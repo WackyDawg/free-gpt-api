@@ -1,5 +1,10 @@
 # ChatGPT OpenAI-Compatible Proxy
 
+> [!TIP]
+> Check our [Project Roadmap](ROADMAP.md) for current progress and upcoming features.
+
+**Goal:** I aim to achieve full Anthropic API parity so this proxy can be hooked up to the **leaked Claude Code source code**, allowing it to serve as a complete replacement for the Anthropic API.
+
 A Node.js proxy server that exposes an **OpenAI-compatible REST API** backed by a headless ChatGPT browser session (Puppeteer). Supports plain chat completions and full **tool/function calling** via a structured prompt translation layer.
 
 ---
@@ -72,11 +77,13 @@ Initializing browser...
 You can also run the proxy as a Docker container. The included Dockerfile handles all dependencies and sets up a virtual display (Xvfb) so the browser can run in a headless environment.
 
 ### 1. Build the image
+
 ```bash
 docker build -t chatgpt-proxy .
 ```
 
 ### 2. Run the container
+
 ```bash
 docker run -d \
   --name chatgpt-proxy \
@@ -130,11 +137,11 @@ Content-Type: application/json
 }
 ```
 
-| Field      | Type    | Required | Description                                                  |
-| ---------- | ------- | -------- | ------------------------------------------------------------ |
-| `messages` | array   | ✅ yes   | Conversation history. See [Message Roles](#message-roles)    |
-| `model`    | string  | no       | Label for the response. Default: `"chatgpt-proxy"`           |
-| `mode`     | string  | no       | Trigger specific features. See [ChatGPT Modes](#chatgpt-modes)|
+| Field      | Type   | Required | Description                                                    |
+| ---------- | ------ | -------- | -------------------------------------------------------------- |
+| `messages` | array  | ✅ yes   | Conversation history. See [Message Roles](#message-roles)      |
+| `model`    | string | no       | Label for the response. Default: `"chatgpt-proxy"`             |
+| `mode`     | string | no       | Trigger specific features. See [ChatGPT Modes](#chatgpt-modes) |
 
 ---
 
