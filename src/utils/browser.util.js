@@ -64,7 +64,8 @@ export class ChatGPTClient {
       });
 
       console.log(
-        chalk.blueBright("===> ") + "[init] waiting for #prompt-textarea (this may take a minute if Cloudflare check is active)...",
+        chalk.blueBright("===> ") +
+          "[init] waiting for #prompt-textarea (this may take a minute if Cloudflare check is active)...",
       );
 
       //await page.screenshot({ path: "./test.png" });
@@ -118,7 +119,9 @@ export class ChatGPTClient {
     await page.keyboard.press("Enter");
 
     const headers = await headersPromise;
-    console.log(chalk.magentaBright("===> ") + "[headers] fresh tokens captured");
+    console.log(
+      chalk.magentaBright("===> ") + "[headers] fresh tokens captured",
+    );
 
     await page.focus("#prompt-textarea");
     await page.keyboard.down("Control");
@@ -224,7 +227,10 @@ export class ChatGPTClient {
       },
     );
 
-    console.log(chalk.cyanBright("===> ") + `[chat] status=${result.status} len=${result.text.length}`);
+    console.log(
+      chalk.cyanBright("===> ") +
+        `[chat] status=${result.status} len=${result.text.length}`,
+    );
 
     if (result.status === 401 || result.status === 403) {
       throw new Error(`auth_expired:${result.status}`);
@@ -238,7 +244,10 @@ export class ChatGPTClient {
   }
 
   async _reset() {
-    console.warn(chalk.yellowBright("===> ") + "[reset] soft recovery — clearing textarea...");
+    console.warn(
+      chalk.yellowBright("===> ") +
+        "[reset] soft recovery — clearing textarea...",
+    );
     await this.page.focus("#prompt-textarea");
     await this.page.keyboard.down("Control");
     await this.page.keyboard.press("a");
@@ -253,7 +262,11 @@ export class ChatGPTClient {
       try {
         return await this._doChat(messages, mode);
       } catch (err) {
-        console.warn(chalk.yellowBright("===> ") + "[chat] error:", err.message, "— recovering...");
+        console.warn(
+          chalk.yellowBright("===> ") + "[chat] error:",
+          err.message,
+          "— recovering...",
+        );
         await this._reset();
         return await this._doChat(messages, mode);
       }
