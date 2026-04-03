@@ -1,0 +1,13 @@
+node_modules
+npm-debug.log
+.git
+.github
+.env
+.vscode
+.gemini
+.claude
+dist
+build
+.dockerignore
+Dockerfile
+docker-compose.yml

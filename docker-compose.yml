@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  chatgpt-proxy:
+    build: .
+    container_name: chatgpt-proxy
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - PORT=3000
+      - HEADLESS=true
+    shm_size: '2gb'
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10mb"
+        max-file: "3"

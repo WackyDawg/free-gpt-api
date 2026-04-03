@@ -1,0 +1,161 @@
+import { describe, it, expect } from "vitest";
+import {
+  serializeTools,
+  serializeMessage,
+  buildPromptWithTools,
+  parseToolCallReply,
+} from "../utils/tools.util.js";
+
+const READ_TOOL = {
+  type: "function",
+  function: {
+    name: "Read",
+    description: "Read the contents of a file",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string" } },
+      required: ["path"],
+    },
+  },
+};
+
+describe("serializeTools", () => {
+  it("returns empty string when no tools", () => {
+    expect(serializeTools([])).toBe("");
+    expect(serializeTools(null)).toBe("");
+  });
+
+  it("wraps tool in <available_tools> block", () => {
+    const out = serializeTools([READ_TOOL]);
+    expect(out).toContain("<available_tools>");
+    expect(out).toContain('<tool name="Read">');
+    expect(out).toContain("Read the contents of a file");
+    expect(out).toContain("</available_tools>");
+  });
+
+  it("skips non-function tools", () => {
+    const out = serializeTools([{ type: "retrieval" }]);
+    expect(out).toBe("<available_tools>\n</available_tools>");
+  });
+});
+
+describe("serializeMessage", () => {
+  it("serialises user message", () => {
+    expect(serializeMessage({ role: "user", content: "Hello" })).toBe(
+      "User: Hello",
+    );
+  });
+
+  it("serialises system message", () => {
+    expect(serializeMessage({ role: "system", content: "Be helpful" })).toBe(
+      "[System]: Be helpful",
+    );
+  });
+
+  it("serialises assistant message with tool_calls", () => {
+    const msg = {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        {
+          id: "call_abc",
+          type: "function",
+          function: { name: "Read", arguments: '{"path":"notes.txt"}' },
+        },
+      ],
+    };
+    const out = serializeMessage(msg);
+    expect(out).toContain('<tool_call id="call_abc" name="Read">');
+    expect(out).toContain('{"path":"notes.txt"}');
+  });
+
+  it("serialises tool result", () => {
+    const msg = { role: "tool", tool_call_id: "call_abc", content: "Buy milk" };
+    const out = serializeMessage(msg);
+    expect(out).toBe('<tool_result id="call_abc">Buy milk</tool_result>');
+  });
+
+  it("serialises tool result without id", () => {
+    const msg = { role: "tool", content: "Buy milk" };
+    expect(serializeMessage(msg)).toBe("<tool_result>Buy milk</tool_result>");
+  });
+});
+
+describe("parseToolCallReply", () => {
+  it("returns text when no tool_call tags present", () => {
+    const { text, toolCalls } = parseToolCallReply("The file has: Buy milk");
+    expect(text).toBe("The file has: Buy milk");
+    expect(toolCalls).toBeNull();
+  });
+
+  it("parses a single tool call", () => {
+    const raw = `<tool_call id="call_1" name="Read">{"path":"notes.txt"}</tool_call>`;
+    const { text, toolCalls } = parseToolCallReply(raw);
+    expect(text).toBeNull();
+    expect(toolCalls).toHaveLength(1);
+    expect(toolCalls[0]).toMatchObject({
+      id: "call_1",
+      type: "function",
+      function: { name: "Read", arguments: '{"path":"notes.txt"}' },
+    });
+  });
+
+  it("parses multiple tool calls", () => {
+    const raw = `
+      <tool_call id="call_1" name="Read">{"path":"a.txt"}</tool_call>
+      <tool_call id="call_2" name="Read">{"path":"b.txt"}</tool_call>
+    `;
+    const { toolCalls } = parseToolCallReply(raw);
+    expect(toolCalls).toHaveLength(2);
+    expect(toolCalls[1].id).toBe("call_2");
+  });
+
+  it("trims whitespace from arguments", () => {
+    const raw = `<tool_call id="c" name="Fn">  {"x":1}  </tool_call>`;
+    const { toolCalls } = parseToolCallReply(raw);
+    expect(toolCalls[0].function.arguments).toBe('{"x":1}');
+  });
+});
+
+describe("buildPromptWithTools", () => {
+  it("includes tool schema and instruction when tools present", () => {
+    const messages = [{ role: "user", content: "Read notes.txt" }];
+    const prompt = buildPromptWithTools(messages, [READ_TOOL]);
+    expect(prompt).toContain("<available_tools>");
+    expect(prompt).toContain("tool_call");
+    expect(prompt).toContain("User: Read notes.txt");
+    expect(prompt).toContain("Assistant:");
+  });
+
+  it("omits tool block when no tools", () => {
+    const messages = [{ role: "user", content: "Hello" }];
+    const prompt = buildPromptWithTools(messages, []);
+    expect(prompt).not.toContain("<available_tools>");
+    expect(prompt).toContain("User: Hello");
+  });
+
+  it("round-trips the full tool-call conversation", () => {
+    const messages = [
+      { role: "user", content: "What is in notes.txt?" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_tuefggdxl",
+            type: "function",
+            function: { name: "Read", arguments: '{"path":"notes.txt"}' },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "call_tuefggdxl",
+        content: "Buy milk\nCall dentist",
+      },
+    ];
+    const prompt = buildPromptWithTools(messages, [READ_TOOL]);
+    expect(prompt).toContain("call_tuefggdxl");
+    expect(prompt).toContain("Buy milk");
+  });
+});
