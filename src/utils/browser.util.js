@@ -48,7 +48,50 @@ export class ChatGPTClient {
         executablePath,
         fingerprint: true,
         turnstile: true,
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--ignore-certificate-errors",
+          "--ignore-certificate-errors-spki-list",
+          "--disable-gpu",
+          "--disable-infobars",
+          "--window-position=0,0",
+          "--ignore-certifcate-errors",
+          "--ignore-certifcate-errors-spki-list",
+          "--disable-speech-api",
+          "--disable-backgrounding-occluded-windows",
+          "--disable-breakpad",
+          "--disable-client-side-phishing-detection",
+          "--disable-component-update",
+          "--disable-default-apps",
+          "--disable-dev-shm-usage",
+          "--disable-domain-reliability",
+          "--disable-extensions",
+          "--disable-features=AudioServiceOutOfProcess",
+          "--disable-hang-monitor",
+          "--disable-ipc-flooding-protection",
+          "--disable-notifications",
+          "--disable-offer-store-unmasked-wallet-cards",
+          "--disable-popup-blocking",
+          "--disable-print-preview",
+          "--disable-prompt-on-repost",
+          "--disable-renderer-backgrounding",
+          "--disable-setuid-sandbox",
+          "--disable-sync",
+          "--hide-scrollbars",
+          "--ignore-gpu-blacklist",
+          "--metrics-recording-only",
+          "--mute-audio",
+          "--no-default-browser-check",
+          "--no-first-run",
+          "--no-pings",
+          "--no-sandbox",
+          "--no-zygote",
+          "--password-store=basic",
+          "--use-gl=swiftshader",
+          "--use-mock-keychain",
+          "--incognito",
+        ],
       });
 
       this.browser = browser;
@@ -88,7 +131,7 @@ export class ChatGPTClient {
     }
   }
 
-  async _doChat(messages, mode = "default") {
+  async _doChat(messages, mode = "default", modelSlug = "auto") {
     const page = this.page;
 
     const messageList = Array.isArray(messages)
@@ -157,7 +200,7 @@ export class ChatGPTClient {
               };
             }),
             parent_message_id: p.parentId,
-            model: "auto",
+            model: p.modelSlug,
             timezone_offset_min: new Date().getTimezoneOffset(),
             suggestions: [],
             text: {
@@ -224,6 +267,7 @@ export class ChatGPTClient {
                 : mode === "quiz"
                   ? ["connector:connector_openai_quizgpt_v2"]
                   : [],
+        modelSlug,
       },
     );
 
@@ -256,11 +300,11 @@ export class ChatGPTClient {
     await new Promise((r) => setTimeout(r, 500));
   }
 
-  chat(messages, mode = "default") {
+  chat(messages, mode = "default", modelSlug = "auto") {
     const task = this._queue.then(async () => {
       if (!this.page) await this.init();
       try {
-        return await this._doChat(messages, mode);
+        return await this._doChat(messages, mode, modelSlug);
       } catch (err) {
         console.warn(
           chalk.yellowBright("===> ") + "[chat] error:",
@@ -268,7 +312,7 @@ export class ChatGPTClient {
           "— recovering...",
         );
         await this._reset();
-        return await this._doChat(messages, mode);
+        return await this._doChat(messages, mode, modelSlug);
       }
     });
     this._queue = task.catch(() => {});

@@ -6,12 +6,13 @@ import {
   parseToolCallReply,
 } from "../utils/tools.util.js";
 import { config } from "../config/config.js";
+import { MODEL_SLUG_MAP, MODEL_MAX_TOKENS } from "../routes/models.route.js";
 
 export const client = new ChatGPTClient();
 
 export class ProxyController {
   async chat(req, res) {
-    const { messages, tools, model, mode, stream } = req.body;
+    const { messages, tools, model, mode, stream, max_tokens } = req.body;
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({
@@ -38,8 +39,33 @@ export class ProxyController {
     );
 
     try {
-      const rawText = await client.chat(structuredMessages, mode || "default");
+      const requestedModel = model || "gpt-5.3";
+      const gptSlug = MODEL_SLUG_MAP[requestedModel] ?? "auto";
+      const modelMaxTokens = MODEL_MAX_TOKENS[requestedModel] ?? 16384;
+
+      const effectiveMaxTokens = max_tokens
+        ? Math.min(max_tokens, modelMaxTokens)
+        : modelMaxTokens;
+
+      const rawText = await client.chat(
+        structuredMessages,
+        mode || "default",
+        gptSlug,
+      );
+
       const { text, toolCalls } = parseToolCallReply(rawText);
+
+      let finalText = text;
+      let finishReason = "stop";
+
+      if (effectiveMaxTokens) {
+        const tokens = estimateTokens(finalText);
+        if (tokens > effectiveMaxTokens) {
+          const ratio = effectiveMaxTokens / tokens;
+          finalText = finalText.slice(0, Math.floor(finalText.length * ratio));
+          finishReason = "length";
+        }
+      }
 
       const promptTokens = estimateTokens(prompt);
       const completionTokens = estimateTokens(rawText);
@@ -58,9 +84,9 @@ export class ProxyController {
             index: 0,
             message: {
               role: "assistant",
-              content: text,
+              content: finalText,
             },
-            finish_reason: "stop",
+            finish_reason: finishReason,
           };
 
       return res.json({

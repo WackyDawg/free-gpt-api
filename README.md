@@ -42,7 +42,8 @@ src/
 ├── server.js                    # Entry point — starts Express, initialises browser
 ├── app.js                       # Express app, mounts routes
 ├── routes/
-│   └── proxy.route.js           # POST /v1/chat/completions
+│   ├── proxy.route.js           # POST /v1/chat/completions
+│   └── models.route.js          # GET /v1/models (list and individual lookups)
 ├── controller/
 │   └── proxy.controller.js      # Request validation, orchestration, response shaping
 └── utils/
@@ -111,6 +112,36 @@ Liveness check. Returns immediately without touching the browser.
 
 ---
 
+### `GET /v1/models`
+
+Standard OpenAI endpoint to list available models, their max tokens, and metadata.
+
+**Response**
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "gpt-5.3",
+      "max_tokens": 34834,
+      "owned_by": "openai",
+      "object": "model",
+      "created": 1740614400
+    },
+    ...
+  ]
+}
+```
+
+---
+
+### `GET /v1/models/:id`
+
+Retrieve details for a single model.
+
+---
+
 ### `POST /v1/chat/completions`
 
 OpenAI-compatible chat completions endpoint. Supports plain conversations and tool/function calling.
@@ -137,11 +168,12 @@ Content-Type: application/json
 }
 ```
 
-| Field      | Type   | Required | Description                                                    |
-| ---------- | ------ | -------- | -------------------------------------------------------------- |
-| `messages` | array  | ✅ yes   | Conversation history. See [Message Roles](#message-roles)      |
-| `model`    | string | no       | Label for the response. Default: `"chatgpt-proxy"`             |
-| `mode`     | string | no       | Trigger specific features. See [ChatGPT Modes](#chatgpt-modes) |
+| Field        | Type   | Required | Description                                                      |
+| ------------ | ------ | -------- | ---------------------------------------------------------------- |
+| `messages`   | array  | ✅ yes   | Conversation history. See [Message Roles](#message-roles)        |
+| `model`      | string | no       | Label for the response. Default: `"chatgpt-proxy"`               |
+| `max_tokens` | number | no       | Max tokens to return. Truncates and sets `finish_reason: length` |
+| `mode`       | string | no       | Trigger specific features (reasoning, deep-research, etc.)       |
 
 ---
 

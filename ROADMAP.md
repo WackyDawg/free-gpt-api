@@ -12,6 +12,8 @@ matching the reliability and feature set of a real LLM API.
 - [x] **Dockerized Environment**: Ready-to-use Dockerfile and Docker Compose with Xvfb for headless operation.
 - [x] **Headless Mode Support**: Puppeteer configured to pass bot checks effectively.
 - [x] **Basic Health Monitoring**: `/health` endpoint for liveness checks.
+- [x] **GET /v1/models Support**: Standard endpoint for listing available models.
+- [x] **`max_tokens` and Truncation**: Support for capping responses and returning `finish_reason: "length"`.
 - [x] **Environment Configuration**: Robust configuration via `.env` and `config.js`.
 
 ---
@@ -78,39 +80,6 @@ use impossible.
 ---
 
 ## Priority 2 — API Completeness (Missing from OpenAI spec)
-
-### 2.1 `GET /v1/models`
-**Current state:** Not implemented — returns 404.  
-**Why it matters:** The OpenAI SDK calls this endpoint on initialisation. Without it, SDK
-users see an error before making a single chat request.  
-**What to build:**
-```json
-{
-  "object": "list",
-  "data": [
-    { "id": "gpt-5.3",        "object": "model", "created": 1700000000, "owned_by": "chatgpt-proxy" },
-    { "id": "gpt-4o",         "object": "model", "created": 1700000000, "owned_by": "chatgpt-proxy" },
-    { "id": "gpt-4o-mini",    "object": "model", "created": 1700000000, "owned_by": "chatgpt-proxy" },
-    { "id": "o1",             "object": "model", "created": 1700000000, "owned_by": "chatgpt-proxy" },
-    { "id": "deep-research",  "object": "model", "created": 1700000000, "owned_by": "chatgpt-proxy" }
-  ]
-}
-```
-Map model IDs to `mode` values in the controller (e.g. `"o1"` → `mode: "reasoning"`,
-`"deep-research"` → `mode: "deep-research"`).
-
----
-
-### 2.2 `max_tokens` support
-**Current state:** Ignored entirely.  
-**Why it matters:** Clients use it to budget responses and avoid runaway completions.  
-**What to build:**  
-- Accept `max_tokens` from the request body.  
-- After receiving the full response text, truncate at the token boundary using the existing
-  `estimateTokens` logic.  
-- Set `finish_reason: "length"` when truncation occurs (vs `"stop"` for natural completion).
-
----
 
 ### 2.3 `temperature` and `top_p` passthrough
 **Current state:** Ignored — ChatGPT always uses its own defaults.  
@@ -311,8 +280,8 @@ SYSTEM_PROMPT=               # Override the default system prompt
 | 1.2 | Session persistence | Medium | Critical |
 | 1.3 | Concurrent request 429 | Low | High |
 | 1.4 | Tool call retry on refusal | Low | High |
-| 2.1 | `GET /v1/models` | Low | High |
-| 2.2 | `max_tokens` | Low | Medium |
+| 2.1 | `GET /v1/models` | Low | High | ✅ |
+| 2.2 | `max_tokens` | Low | Medium | ✅ |
 | 2.3 | `temperature` best-effort | Low | Low |
 | 2.4 | `stop` sequences | Low | Medium |
 | 2.5 | Multi-modal images | High | Medium |
@@ -335,10 +304,10 @@ SYSTEM_PROMPT=               # Override the default system prompt
 
 ```
 Week 1 — Make it work reliably
-  1.4 → 1.2 → 2.1 → 1.3 → 4.4
+  1.4 → 1.2 → 1.3 → 4.4
 
 Week 2 — Make it complete
-  1.1 → 2.2 → 2.4 → 3.2 → 3.1
+  1.1 → 2.4 → 3.2 → 3.1
 
 Week 3 — Make it safe and observable
   3.3 → 4.1 → 4.2 → 4.3 → 3.4
