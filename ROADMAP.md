@@ -144,6 +144,16 @@ Map model IDs to `mode` values in the controller (e.g. `"o1"` → `mode: "reason
 
 ---
 
+### 2.6 GitHub Repository Integration
+**Current state:** Not implemented. Requests containing GitHub repo URLs are treated as plain text.  
+**Why it matters:** ChatGPT now supports direct repo analysis. Adding this allows the model to fetch and reason over entire codebases via the official GitHub API.  
+**What to build:**  
+- Detect GitHub repository URLs or `selected_github_repos` in the request.  
+- Integrate with `GET https://api.github.com/repos/{owner}/{repo}/contents`.  
+- Inject the repository context into the Puppeteer session using the same internal structure ChatGPT uses.
+
+---
+
 ## Priority 3 — Agent Loop Quality
 
 ### 3.1 Growing context window management
@@ -306,6 +316,7 @@ SYSTEM_PROMPT=               # Override the default system prompt
 | 2.3 | `temperature` best-effort | Low | Low |
 | 2.4 | `stop` sequences | Low | Medium |
 | 2.5 | Multi-modal images | High | Medium |
+| 2.6 | GitHub Integration | Medium | High |
 | 3.1 | Context window management | Medium | High |
 | 3.2 | Parallel tool execution | Low | High |
 | 3.3 | Tool execution sandboxing | High | Critical |
