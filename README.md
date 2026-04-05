@@ -116,6 +116,16 @@ Liveness check. Returns immediately without touching the browser.
 
 Standard OpenAI endpoint to list available models, their max tokens, and metadata.
 
+**Supported Models:**
+- `gpt-5.3` (Slug: `gpt-5-3`)
+- `gpt-5.2` (Slug: `gpt-5-2`)
+- `gpt-5.1` (Slug: `gpt-5-1`)
+- `gpt-5` (Slug: `gpt-5`)
+- `gpt-5-mini` (Slug: `gpt-5-mini`)
+- `o1`, `o1-mini`
+- `gpt-4o`, `gpt-4o-mini`
+- `auto`
+
 **Response**
 
 ```json

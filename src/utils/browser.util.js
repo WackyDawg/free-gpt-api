@@ -247,6 +247,7 @@ export class ChatGPTClient {
           .replace(/entity\["[^"]+","([^"]+)"(?:\s*,\s*"[^"]*")*\]/g, "$1")
           .replace(/\\n/g, "\n");
 
+        localStorage.removeItem("perfStore:v1");
         return { status: res.status, text: cleanText };
       },
       {
@@ -290,14 +291,18 @@ export class ChatGPTClient {
   async _reset() {
     console.warn(
       chalk.yellowBright("===> ") +
-        "[reset] soft recovery — clearing textarea...",
+        "[reset] hard recovery — refreshing browser...",
     );
-    await this.page.focus("#prompt-textarea");
-    await this.page.keyboard.down("Control");
-    await this.page.keyboard.press("a");
-    await this.page.keyboard.up("Control");
-    await this.page.keyboard.press("Backspace");
-    await new Promise((r) => setTimeout(r, 500));
+    try {
+      await this.page.evaluate(() => {
+        localStorage.removeItem("perfStore:v1");
+      }).catch(() => {});
+      await this.page.reload({ waitUntil: "domcontentloaded" });
+      await this.page.waitForSelector("#prompt-textarea", { timeout: 0 });
+      await new Promise((r) => setTimeout(r, 2000));
+    } catch (err) {
+      console.error(chalk.redBright("===> ") + "[reset] refresh error:", err.message);
+    }
   }
 
   chat(messages, mode = "default", modelSlug = "auto") {
