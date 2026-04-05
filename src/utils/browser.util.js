@@ -244,8 +244,12 @@ export class ChatGPTClient {
         }
 
         const cleanText = fullText
+          .replace(/(\\r\\n|\\n|\\r|[\r\n]+|【[^】]+】|\[\d+\])/g, " ")
+          .replace(/^[A-Z][^.!?]{2,100}:\s*/, "")
           .replace(/entity\["[^"]+","([^"]+)"(?:\s*,\s*"[^"]*")*\]/g, "$1")
-          .replace(/\\n/g, "\n");
+          .replace(/(\*\*|__|\*|_|~~|`|#{1,6}\s+|[-*+]\s+)/g, "")
+          .replace(/\s{2,}/g, " ")
+          .trim();
 
         localStorage.removeItem("perfStore:v1");
         return { status: res.status, text: cleanText };
@@ -294,14 +298,19 @@ export class ChatGPTClient {
         "[reset] hard recovery — refreshing browser...",
     );
     try {
-      await this.page.evaluate(() => {
-        localStorage.removeItem("perfStore:v1");
-      }).catch(() => {});
+      await this.page
+        .evaluate(() => {
+          localStorage.removeItem("perfStore:v1");
+        })
+        .catch(() => {});
       await this.page.reload({ waitUntil: "domcontentloaded" });
       await this.page.waitForSelector("#prompt-textarea", { timeout: 0 });
       await new Promise((r) => setTimeout(r, 2000));
     } catch (err) {
-      console.error(chalk.redBright("===> ") + "[reset] refresh error:", err.message);
+      console.error(
+        chalk.redBright("===> ") + "[reset] refresh error:",
+        err.message,
+      );
     }
   }
 

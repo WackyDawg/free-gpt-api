@@ -166,14 +166,15 @@ Content-Type: application/json
 
 ## Request Format
 
-### Plain chat (no tools)
+### Example Request (with System Role)
 
 ```json
 {
-  "model": "gpt-5.3",
+  "model": "auto",
+  "tools": [],
   "messages": [
-    { "role": "system", "content": "You are a helpful assistant." },
-    { "role": "user", "content": "What is the capital of France?" }
+    { "role": "system", "content": "You are a trading assistant." },
+    { "role": "user", "content": "Whats your role?" }
   ]
 }
 ```
@@ -386,30 +387,29 @@ Append the assistant's tool call message and the tool result to your messages ar
 
 ## Response Format
 
-All successful responses follow the OpenAI `chat.completion` shape:
+All successful responses follow the OpenAI `chat.completion` shape. Below is an example of a cleaned, flattened response:
 
 ```json
 {
-  "id": "chatcmpl-<uuid>",
-  "object": "chat.completion",
-  "created": 1716000000,
-  "model": "<model from request>",
-  "choices": [
-    {
-      "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": "...",        // string on stop, null on tool_calls
-        "tool_calls": [ ... ]   // present only when finish_reason is tool_calls
-      },
-      "finish_reason": "stop" | "tool_calls"
+    "id": "chatcmpl-e9f87659-dd9f-40fc-ada4-92cec1935b3e",
+    "object": "chat.completion",
+    "created": 1775385588,
+    "model": "auto",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "Answering questions & explaining concepts (from simple to complex) Software engineering help (coding, debugging, system design) Trading & market insights (analysis, strategies, risk concepts—not financial advice) Research & summaries Planning & decision support Creative and practical writing I aim to give clear, accurate, and useful responses tailored to what you need. If you want, you can test me—ask me anything 👍"
+            },
+            "finish_reason": "stop"
+        }
+    ],
+    "usage": {
+        "prompt_tokens": 16,
+        "completion_tokens": 80,
+        "total_tokens": 96
     }
-  ],
-  "usage": {
-    "prompt_tokens": 0,
-    "completion_tokens": 0,
-    "total_tokens": 0
-  }
 }
 ```
 
