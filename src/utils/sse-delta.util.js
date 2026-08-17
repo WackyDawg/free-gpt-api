@@ -22,7 +22,7 @@ const DONE = "[DONE]";
 /** Splits an SSE body into { event, data } records. Tolerates partial tails. */
 export function parseSseBlocks(text) {
   const records = [];
-  for (const block of text.split("\n\n")) {
+  for (const block of text.replace(/\r\n?/g, "\n").split("\n\n")) {
     if (!block.trim()) continue;
     let event = "message";
     const data = [];
@@ -95,13 +95,38 @@ function applyOp(state, op) {
 }
 
 /** Text of a message, whatever shape its content takes. */
+function textValue(value) {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(textValue).join("");
+  if (!value || typeof value !== "object") return "";
+  return textValue(value.text ?? value.messageText ?? value.content ?? value.summary);
+}
+
 function messageText(message) {
   const content = message?.content;
-  if (!content) return "";
-  if (Array.isArray(content.parts)) {
-    return content.parts.filter((p) => typeof p === "string").join("");
-  }
-  return typeof content.text === "string" ? content.text : "";
+  return [
+    textValue(content?.parts),
+    textValue(content?.text),
+    textValue(message?.messageText),
+  ].find(Boolean) || "";
+}
+
+/** Text carried by a provider-exposed reasoning/summary message. */
+function reasoningText(message) {
+  const content = message?.content || {};
+  return [
+    textValue(content.parts),
+    textValue(content.text),
+    textValue(content.summary),
+    textValue(content.thoughts),
+    textValue(content.reasoning),
+    // reasoning_recap stores its prose directly in content.content.
+    textValue(content.content),
+    textValue(message.messageText),
+    textValue(message.summary),
+    textValue(message.thoughts),
+    textValue(message.reasoning),
+  ].find(Boolean) || "";
 }
 
 /**
@@ -118,6 +143,27 @@ export function isFinalAnswer(message) {
   if (type !== "text" && type !== "multimodal_text") return false;
   if (message.channel && message.channel !== "final") return false;
   return true;
+}
+
+/**
+ * True for a thinking model's reasoning summary — the "Thinking…" content that
+ * streams before the final answer. Surfacing it lets a client watch the model
+ * reason in real time instead of waiting for the whole turn.
+ */
+export function isReasoning(message) {
+  if (!message || message.author?.role !== "assistant") return false;
+  const type = message.content?.content_type;
+  const metadata = message.metadata || {};
+  const hasReasoningMetadata = Object.keys(metadata).some((key) =>
+    /reasoning|thought/i.test(key),
+  );
+  return (
+    type === "reasoning_recap" ||
+    type === "thoughts" ||
+    type === "reasoning" ||
+    message.channel === "analysis" ||
+    hasReasoningMetadata
+  );
 }
 
 /**
@@ -160,11 +206,14 @@ export function parseTurnStream(text) {
     try {
       payload = JSON.parse(record.data);
     } catch {
+      if (record.event === "delta_encoding") {
+        encoding = record.data.trim().replace(/^"|"$/g, "");
+      }
       continue; // truncated tail; caller may retry with more data
     }
 
     if (record.event === "delta_encoding") {
-      encoding = payload;
+      encoding = payload ?? record.data.trim().replace(/^"|"$/g, "");
       continue;
     }
 
@@ -187,10 +236,20 @@ export function parseTurnStream(text) {
     }
   }
 
+  // Some WebSocket subscriptions begin after the control marker was emitted.
+  // The delta event grammar is still unambiguously v1, so do not report a
+  // missing marker as a failed decode.
+  if (!encoding && /(?:^|\n)event:\s*delta(?:\s|$)/m.test(text)) encoding = "v1";
+
   const messages = [...state.messagesById.values()];
   const finals = messages.filter(isFinalAnswer);
   // Later messages supersede earlier ones on the same channel.
   const answer = finals.length ? messageText(finals[finals.length - 1]) : "";
+  const reasoning = messages
+    .filter(isReasoning)
+    .map(reasoningText)
+    .filter(Boolean)
+    .join("\n");
 
   return {
     encoding,
@@ -198,6 +257,7 @@ export function parseTurnStream(text) {
     streamComplete,
     conversationId,
     text: answer,
+    reasoning,
     messages,
     events,
     legacySnapshots,
@@ -208,26 +268,31 @@ export function parseTurnStream(text) {
 export function orderStreamItems(items) {
   const byId = new Map(items.map((item) => [item.stream_item_id, item]));
   const children = new Map();
-  let root = null;
+  const roots = [];
 
   for (const item of items) {
     const parent = item.parent_stream_item_id;
     if (!parent || !byId.has(parent)) {
-      if (!root) root = item;
+      roots.push(item);
       continue;
     }
-    children.set(parent, item);
+    if (!children.has(parent)) children.set(parent, []);
+    children.get(parent).push(item);
   }
-  if (!root) return items.slice();
+  if (!roots.length) return items.slice();
 
   const ordered = [];
   const seen = new Set();
-  let cursor = root;
-  while (cursor && !seen.has(cursor.stream_item_id)) {
+  const byTime = (a, b) => (a.server_timestamp_ms || 0) - (b.server_timestamp_ms || 0);
+  roots.sort(byTime);
+  for (const siblings of children.values()) siblings.sort(byTime);
+  const visit = (cursor) => {
+    if (!cursor || seen.has(cursor.stream_item_id)) return;
     seen.add(cursor.stream_item_id);
     ordered.push(cursor);
-    cursor = children.get(cursor.stream_item_id);
-  }
+    for (const child of children.get(cursor.stream_item_id) || []) visit(child);
+  };
+  for (const root of roots) visit(root);
   for (const item of items) {
     if (!seen.has(item.stream_item_id)) ordered.push(item);
   }

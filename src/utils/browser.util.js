@@ -418,7 +418,7 @@ export class ChatGPTClient {
       const timer = setTimeout(() => {
         this._nativeUploadWaiter = null;
         reject(new Error("native big-paste upload timeout"));
-      }, 30_000);
+      }, 120_000);
       this._nativeUploadWaiter = {
         resolve: () => {
           clearTimeout(timer);
@@ -472,7 +472,9 @@ export class ChatGPTClient {
       .find((message) => Buffer.byteLength(message.text || "", "utf8") >= 40_000)?.text;
     // The native path (page issues the request so its own upload biscuit is
     // attached) is needed for a large text paste OR any binary file upload.
-    const nativeBigPaste = !useNativeRequest && (Boolean(largePrompt) || attachFiles.length > 0);
+    // Applies to thinking models too: they already send natively, so file
+    // attachment and the interceptor's harvest work the same way.
+    const nativeBigPaste = Boolean(largePrompt) || attachFiles.length > 0;
     const TRIGGER_MAX = 2000;
     const submissionText = largePrompt
       ? largePrompt
@@ -495,23 +497,6 @@ export class ChatGPTClient {
     await page.keyboard.up("Control");
     await page.keyboard.press("Backspace");
     const _tClear = _since();
-
-    let headerTimer;
-    const headersPromise = new Promise((resolve, reject) => {
-      this._captureNextHeaders = (h) => {
-        clearTimeout(headerTimer);
-        resolve(h);
-      };
-      headerTimer = setTimeout(() => {
-        this._captureNextHeaders = null;
-        reject(new Error("header intercept timeout"));
-      }, 15000);
-    });
-    // Safety net: if the trigger sequence below throws before we await this
-    // promise, its timeout rejection would otherwise be unhandled and crash the
-    // whole process. This no-op subscriber keeps it handled; the real value is
-    // still consumed by `await headersPromise`, and errors surface there.
-    headersPromise.catch(() => {});
 
     if (useNativeRequest || nativeBigPaste) {
       this._nativeRequestOptions = {
@@ -548,6 +533,26 @@ export class ChatGPTClient {
       await this._insertPrompt(submissionText);
     }
     const _tInsert = _since();
+
+    // Arm header capture only now — after any file upload, which can take
+    // minutes for a large binary. Arming it earlier lets the 15s timer expire
+    // during the upload, before the conversation request that needs the headers
+    // is ever sent.
+    let headerTimer;
+    const headersPromise = new Promise((resolve, reject) => {
+      this._captureNextHeaders = (h) => {
+        clearTimeout(headerTimer);
+        resolve(h);
+      };
+      headerTimer = setTimeout(() => {
+        this._captureNextHeaders = null;
+        reject(new Error("header intercept timeout"));
+      }, 15000);
+    });
+    // Safety net: keep the timeout rejection handled so a throw before we await
+    // it cannot crash the process; the real value is consumed below.
+    headersPromise.catch(() => {});
+
     // Give React one frame to register the inserted text before Enter submits,
     // rather than a fixed 300ms. If the composer still shows text we proceed
     // immediately; the short poll replaces a blind sleep.
@@ -573,8 +578,36 @@ export class ChatGPTClient {
       // for a thinking model, otherwise from the rendered DOM.
       let turn = null;
       if (useNativeRequest) {
+        // Stream reasoning + answer deltas as they arrive over the WebSocket,
+        // so a client can watch a thinking model work instead of waiting for
+        // the whole turn. Deltas are the raw appended text since the last item.
+        const onDelta = typeof options.onDelta === "function" ? options.onDelta : null;
+        let lastReasoning = "";
+        let lastAnswer = "";
+        const onUpdate = onDelta
+          ? (snap) => {
+              const r = snap.reasoning || "";
+              const a = snap.text || "";
+              const emitAppend = (type, next, previous, setPrevious) => {
+                if (!next || next.length <= previous.length) return;
+                const delta = next.startsWith(previous)
+                  ? next.slice(previous.length)
+                  : next;
+                if (delta) onDelta({ type, delta });
+                setPrevious(next);
+              };
+              emitAppend("reasoning", r, lastReasoning, (value) => {
+                lastReasoning = value;
+              });
+              emitAppend("answer", a, lastAnswer, (value) => {
+                lastAnswer = value;
+              });
+            }
+          : null;
         try {
-          turn = await this.tap.waitForTurn({ timeoutMs: 180000 });
+          // Deep reasoning over a large uploaded file (e.g. a whole plugin
+          // audit) can run many minutes with long gaps between stream items.
+          turn = await this.tap.waitForTurn({ timeoutMs: 600000, idleTimeoutMs: 240000, onUpdate });
           console.log(
             chalk.cyanBright("===> ") +
               `[stream] ${turn.itemCount} items encoding=${turn.encoding} len=${turn.text.length}`,
@@ -591,7 +624,7 @@ export class ChatGPTClient {
       // Fallback: read the rendered message. Racy — the DOM lags the stream.
       await page.waitForFunction(
         ({ selector, count }) => document.querySelectorAll(selector).length > count,
-        { timeout: 120000 },
+        { timeout: 300000 },
         { selector: nativeAssistantSelector, count: nativeInitialCount },
       );
       // Stability loop: the DOM streams in and briefly shows a "Thinking…"
@@ -600,7 +633,7 @@ export class ChatGPTClient {
       let previousText = "";
       let stableReads = 0;
       let domText = "";
-      while (Date.now() - startedAt < 180000) {
+      while (Date.now() - startedAt < 480000) {
         domText = await page.$$eval(nativeAssistantSelector, (nodes) => {
           const node = nodes[nodes.length - 1];
           return (node?.innerText || node?.textContent || "").trim();
@@ -788,7 +821,6 @@ export class ChatGPTClient {
               ct: m.content?.content_type,
               channel: m.channel ?? null,
             })),
-            firstBlock: events[0]?.slice(0, 120) ?? "",
           }),
       );
       throw new Error("empty_response");

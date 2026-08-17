@@ -1,5 +1,11 @@
 import chalk from "chalk";
+import fs from "fs";
 import { parseStreamItems } from "./sse-delta.util.js";
+
+// TEMP: structural-only reasoning probe writes here so it can be read back
+// without touching the server console. Contains no tokens or message text.
+const WS_PROBE_FILE =
+  "C:\\Users\\julia\\AppData\\Local\\Temp\\claude\\C--Users-julia-Downloads-free-gpt-api\\3c5f2055-d87a-40ca-ba7f-fb0c87bb4b63\\scratchpad\\ws-probe.log";
 
 /**
  * Read-only tap on the page's own conversation WebSocket, via CDP: it never
@@ -83,6 +89,36 @@ export class TurnStreamTap {
     if (this.debug) console.log(chalk.gray("===> [ws]"), ...args);
   }
 
+  /**
+   * TEMP diagnostic: log only the STRUCTURAL markers of a stream slice — the
+   * SSE event kinds, delta paths, and any content_type/channel/role — never the
+   * `verify` value, any auth token, or the message text. Deduped so each
+   * distinct shape prints once. Used to find the thinking model's reasoning
+   * channel; delete once resolved.
+   */
+  _dumpShape(encodedItem) {
+    if (typeof encodedItem !== "string") return;
+    this._seenShapes ??= new Set();
+    const uniq = (re) => [...new Set([...encodedItem.matchAll(re)].map((m) => m[1]))];
+    const events = uniq(/event:\s*([^\n]+)/g);
+    const dataTypes = uniq(/data:\s*\{"type":"([^"]+)"/g);
+    const contentTypes = uniq(/"content_type":"([^"]+)"/g);
+    const channels = uniq(/"channel":"([^"]+)"/g);
+    const roles = uniq(/"author":\{"role":"([^"]+)"/g);
+    const paths = uniq(/"p":"([^"]*)"/g);
+    // Only the frames that reveal something new about message shape matter.
+    if (!contentTypes.length && !channels.length && !roles.length && !dataTypes.length) return;
+    const shape = JSON.stringify({ events, dataTypes, roles, contentTypes, channels, paths });
+    if (this._seenShapes.has(shape)) return;
+    this._seenShapes.add(shape);
+    console.log(chalk.magentaBright("===> [ws-probe]"), shape);
+    try {
+      fs.appendFileSync(WS_PROBE_FILE, shape + "\n");
+    } catch {
+      /* diagnostic only */
+    }
+  }
+
   _onFrame(raw) {
     if (typeof raw !== "string") return;
     let frames;
@@ -123,6 +159,7 @@ export class TurnStreamTap {
       if (inner.type === "stream-item") {
         const turn = this._turn(key);
         turn.addItem(inner);
+        this._dumpShape(inner.encoded_item); // TEMP: structural-only reasoning probe
         this._notify();
         return;
       }
@@ -191,6 +228,7 @@ export class TurnStreamTap {
     timeoutMs = DEFAULT_TURN_TIMEOUT_MS,
     idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
     acceptDone = false,
+    onUpdate = null,
   } = {}) {
     const known = this.knownTurnIds;
     const startedAt = Date.now();
@@ -231,6 +269,15 @@ export class TurnStreamTap {
         const turn = pick();
         if (!turn) return;
         resetIdle();
+        // Emit an incremental snapshot so callers can stream reasoning/answer
+        // as it arrives. Parsing per item is fine at these volumes.
+        if (onUpdate) {
+          try {
+            onUpdate(this._describe(turn));
+          } catch {
+            /* a broken consumer must not abort the turn */
+          }
+        }
         const finished =
           turn.state === "complete" || (acceptDone && turn.state === "done");
         if (finished) settle(resolve, this._describe(turn));
@@ -255,6 +302,7 @@ export class TurnStreamTap {
       encoding: parsed.encoding,
       streamComplete: parsed.streamComplete,
       text: parsed.text,
+      reasoning: parsed.reasoning,
       messages: parsed.messages,
     };
   }

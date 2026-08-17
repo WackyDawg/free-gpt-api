@@ -70,6 +70,19 @@ describe("parseTurnStream", () => {
     expect(result.encoding).toBe("v1");
   });
 
+  it("extracts reasoning text from nested thoughts/summary fields", () => {
+    const nested = parseTurnStream(
+      `event: delta_encoding\r\ndata: "v1"\r\n\r\nevent: delta\r\ndata: {"p":"","o":"add","v":${envelope({
+        id: "nested-reasoning",
+        author: { role: "assistant" },
+        channel: "analysis",
+        content: { content_type: "text", thoughts: [{ summary: "Visible reasoning" }] },
+        metadata: { reasoning_status: "streaming" },
+      })}}\r\n\r\n`,
+    );
+    expect(nested.reasoning).toBe("Visible reasoning");
+  });
+
   it("reconstructs the final answer from append ops", () => {
     expect(result.text).toBe("Hello, world");
   });
@@ -133,6 +146,15 @@ describe("orderStreamItems", () => {
   it("keeps orphans instead of dropping them", () => {
     const withOrphan = [...items, { stream_item_id: "z", parent_stream_item_id: "missing", encoded_item: "4" }];
     expect(orderStreamItems(withOrphan)).toHaveLength(4);
+  });
+
+  it("does not discard multiple children of one parent", () => {
+    const branched = [
+      { stream_item_id: "b", parent_stream_item_id: "a", encoded_item: "2" },
+      { stream_item_id: "c", parent_stream_item_id: "a", encoded_item: "3" },
+      { stream_item_id: "a", parent_stream_item_id: null, encoded_item: "1" },
+    ];
+    expect(orderStreamItems(branched)).toHaveLength(3);
   });
 });
 

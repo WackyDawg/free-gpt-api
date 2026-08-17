@@ -79,11 +79,56 @@ export class ProxyController {
 
       const signal = abortSignalFor(req, res);
 
+      const id = `chatcmpl-${randomUUID()}`;
+      const created = Math.floor(Date.now() / 1000);
+      const streamModel = model || "chatgpt-proxy";
+
+      // Live streaming: for a streaming request without tools, emit reasoning
+      // and answer deltas as they arrive over the WebSocket (thinking models),
+      // instead of buffering the whole turn. SSE opens on the first delta.
+      const canStreamLive = Boolean(stream) && (!tools || tools.length === 0);
+      let sseStarted = false;
+      let streamedAnswer = false;
+      const writeChunk = (delta, finish = null) =>
+        res.write(
+          `data: ${JSON.stringify({
+            id,
+            object: "chat.completion.chunk",
+            created,
+            model: streamModel,
+            choices: [{ index: 0, delta, finish_reason: finish }],
+          })}\n\n`,
+        );
+      const startSse = () => {
+        if (sseStarted) return;
+        sseStarted = true;
+        res.status(200).set({
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+          "X-Accel-Buffering": "no",
+        });
+        res.flushHeaders?.();
+        writeChunk({ role: "assistant", content: "" });
+      };
+      const onDelta = canStreamLive
+        ? ({ type, delta }) => {
+            if (!delta) return;
+            startSse();
+            if (type === "reasoning") writeChunk({ reasoning_content: delta });
+            else {
+              writeChunk({ content: delta });
+              streamedAnswer = true;
+            }
+          }
+        : undefined;
+
       const { rawText, text, toolCalls } = await runWithToolGuard({
         chat: (msgs) =>
           client.chat(msgs, mode || "default", gptSlug, effectiveThinkingEffort, {
             signal,
             attachFiles: binaryFiles,
+            onDelta,
           }),
         structuredMessages,
         priorMessages: messages,
@@ -132,8 +177,6 @@ export class ProxyController {
             finish_reason: finishReason,
           };
 
-      const id = `chatcmpl-${randomUUID()}`;
-      const created = Math.floor(Date.now() / 1000);
       const usage = {
         prompt_tokens: promptTokens,
         completion_tokens: completionTokens,
@@ -141,13 +184,37 @@ export class ProxyController {
       };
 
       if (stream) {
-        return this._streamCompletion(res, {
-          id,
-          created,
-          model: model || "chatgpt-proxy",
-          choice,
-          usage,
-        });
+        // Already streaming live: emit any content the deltas missed (e.g. the
+        // final differed from the streamed reasoning), then close.
+        if (sseStarted) {
+          if (toolCalls) {
+            toolCalls.forEach((call, index) =>
+              writeChunk({
+                tool_calls: [
+                  { index, id: call.id, type: "function", function: call.function },
+                ],
+              }),
+            );
+          } else if (!streamedAnswer && finalText) {
+            writeChunk({ content: finalText });
+          }
+          writeChunk({}, choice.finish_reason);
+          res.write(
+            `data: ${JSON.stringify({
+              id,
+              object: "chat.completion.chunk",
+              created,
+              model: streamModel,
+              choices: [],
+              usage,
+            })}\n\n`,
+          );
+          res.write("data: [DONE]\n\n");
+          return res.end();
+        }
+        // Nothing streamed live (non-thinking model, or a tool call): chunk the
+        // finished result the old way.
+        return this._streamCompletion(res, { id, created, model: streamModel, choice, usage });
       }
 
       return res.json({
