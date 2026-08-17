@@ -8,7 +8,8 @@ import { config } from "../config/config.js";
 import { parseTurnStream } from "./sse-delta.util.js";
 import { TurnStreamTap } from "./turn-stream.util.js";
 import { normalizeReply } from "./normalize.util.js";
-import { toUpstreamMessage } from "./tools.util.js";
+import { toUpstreamMessage, buildWireMessages } from "./tools.util.js";
+import { BigPasteCache, offloadLargeMessages, uploadBigPaste } from "./bigpaste.util.js";
 dotenv.config({ path: "../../.env" });
 
 const normalize = (text) =>
@@ -33,10 +34,13 @@ export class ChatGPTClient {
     this._initPromise = null;
     this.tap = null;
     this.busy = false;
+    // Per-worker: a stable, repeated block (this client's own system prompt,
+    // most often) uploads once and is re-attached on every subsequent turn.
+    this._bigPasteCache = new BigPasteCache();
   }
 
   _setupInterceptor() {
-    this.page.on("request", (req) => {
+    this.page.on("request", async (req) => {
       const type = req.resourceType();
       const url = req.url();
 
@@ -65,13 +69,24 @@ export class ChatGPTClient {
             // structured payload is swapped into its own request here.
             if (options.wireMessages?.length) {
               const template = Array.isArray(body.messages) ? body.messages[0] : null;
-              body.messages = options.wireMessages.map((m) => ({
+              const built = options.wireMessages.map((m) => ({
                 ...(template || {}),
                 id: m.id,
                 author: { role: m.role },
                 content: { content_type: "text", parts: [m.text] },
                 metadata: { ...(template?.metadata || {}) },
               }));
+              // A turn's structured payload can carry the same oversized tool
+              // results / handler bodies that would make ChatGPT reject an
+              // inline conversation body; offload anything over threshold to
+              // a big-paste attachment before it goes out.
+              body.messages = (
+                await offloadLargeMessages(
+                  { messages: built },
+                  (text) => uploadBigPaste(this.page, text),
+                  { cache: this._bigPasteCache },
+                )
+              ).messages;
             }
             postData = JSON.stringify(body);
           } catch (err) {
@@ -413,6 +428,30 @@ export class ChatGPTClient {
     await page.keyboard.up("Control");
     await page.keyboard.press("Backspace");
 
+    const systemHints =
+      mode === "reasoning"
+        ? ["reason"]
+        : mode === "deep-research"
+          ? ["connector:connector_openai_deep_research"]
+          : mode === "tatertot"
+            ? ["tatertot"]
+            : mode === "quiz"
+              ? ["connector:connector_openai_quizgpt_v2"]
+              : [];
+
+    // Built in Node context (not inside page.evaluate) so an oversized entry
+    // — a large tool result, a big system prompt — can be offloaded to a
+    // big-paste attachment before it ever crosses into the page; page.evaluate
+    // cannot itself drive a nested page.evaluate for the upload.
+    const builtMessages = buildWireMessages(wireMessages, { systemHints, mode });
+    const offloadedMessages = (
+      await offloadLargeMessages(
+        { messages: builtMessages },
+        (text) => uploadBigPaste(page, text),
+        { cache: this._bigPasteCache },
+      )
+    ).messages;
+
     const result = await page.evaluate(
       async (p) => {
         const res = await fetch("/backend-api/f/conversation", {
@@ -424,22 +463,7 @@ export class ChatGPTClient {
           },
           body: JSON.stringify({
             action: "next",
-            messages: p.messages.map((m, idx) => {
-              const msgMetadata = {};
-              if (p.systemHints.length > 0) {
-                msgMetadata.system_hints = p.systemHints;
-              }
-              if (p.mode === "deep-research") {
-                msgMetadata.deep_research_version = "standard";
-                msgMetadata.venus_model_variant = "standard";
-              }
-              return {
-                id: m.id,
-                author: { role: m.role },
-                content: { content_type: "text", parts: [m.text] },
-                metadata: msgMetadata,
-              };
-            }),
+            messages: p.messages,
             parent_message_id: p.parentId,
             model: p.modelSlug,
             ...(p.thinkingEffort
@@ -477,19 +501,9 @@ export class ChatGPTClient {
       },
       {
         headers,
-        messages: wireMessages,
+        messages: offloadedMessages,
         parentId: randomUUID(),
-        mode,
-        systemHints:
-          mode === "reasoning"
-            ? ["reason"]
-            : mode === "deep-research"
-              ? ["connector:connector_openai_deep_research"]
-              : mode === "tatertot"
-                ? ["tatertot"]
-                : mode === "quiz"
-                  ? ["connector:connector_openai_quizgpt_v2"]
-                  : [],
+        systemHints,
         modelSlug,
         thinkingEffort: effort,
       },

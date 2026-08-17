@@ -167,6 +167,35 @@ export function toUpstreamMessage(msg) {
   return { role, text };
 }
 
+/**
+ * Shapes upstream-ready {role, text, id} entries (see toUpstreamMessage) into
+ * the ChatGPT conversation-turn wire format. Runs in Node context, ahead of
+ * the network call, so offloadLargeMessages (bigpaste.util.js) can rewrite an
+ * oversized entry's `content.parts` into an attachment reference before it
+ * ever reaches the page.
+ *
+ * @param {{role: string, text: string, id: string}[]} wireMessages
+ * @param {{systemHints?: string[], mode?: string}} [opts]
+ */
+export function buildWireMessages(wireMessages, { systemHints = [], mode } = {}) {
+  return wireMessages.map((m) => {
+    const msgMetadata = {};
+    if (systemHints.length > 0) {
+      msgMetadata.system_hints = systemHints;
+    }
+    if (mode === "deep-research") {
+      msgMetadata.deep_research_version = "standard";
+      msgMetadata.venus_model_variant = "standard";
+    }
+    return {
+      id: m.id,
+      author: { role: m.role },
+      content: { content_type: "text", parts: [m.text] },
+      metadata: msgMetadata,
+    };
+  });
+}
+
 export function parseToolCallReply(rawText) {
   const toolCallRegex =
     /<tool_call\s+id="([^"]+)"\s+name="([^"]+)">([\s\S]*?)<\/tool_call>/g;

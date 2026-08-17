@@ -5,6 +5,7 @@ import {
   buildPromptWithTools,
   parseToolCallReply,
   toUpstreamMessage,
+  buildWireMessages,
 } from "../utils/tools.util.js";
 
 const READ_TOOL = {
@@ -239,5 +240,48 @@ describe("toUpstreamMessage", () => {
       (role) => toUpstreamMessage({ role, content: "x" }).role,
     );
     expect(new Set(roles)).toEqual(new Set(["user", "assistant", "system"]));
+  });
+});
+
+describe("buildWireMessages", () => {
+  it("shapes a wire message from role/text/id, with empty metadata by default", () => {
+    const [out] = buildWireMessages([{ id: "m1", role: "user", text: "hi" }]);
+    expect(out).toEqual({
+      id: "m1",
+      author: { role: "user" },
+      content: { content_type: "text", parts: ["hi"] },
+      metadata: {},
+    });
+  });
+
+  it("attaches system_hints to metadata when provided", () => {
+    const [out] = buildWireMessages([{ id: "m1", role: "user", text: "hi" }], {
+      systemHints: ["reason"],
+    });
+    expect(out.metadata.system_hints).toEqual(["reason"]);
+  });
+
+  it("adds deep-research metadata only when mode is deep-research", () => {
+    const [deepResearch] = buildWireMessages([{ id: "m1", role: "user", text: "hi" }], {
+      mode: "deep-research",
+    });
+    expect(deepResearch.metadata).toMatchObject({
+      deep_research_version: "standard",
+      venus_model_variant: "standard",
+    });
+
+    const [defaultMode] = buildWireMessages([{ id: "m1", role: "user", text: "hi" }]);
+    expect(defaultMode.metadata.deep_research_version).toBeUndefined();
+  });
+
+  it("preserves message order and per-message id/role across multiple messages", () => {
+    const out = buildWireMessages([
+      { id: "a", role: "user", text: "1" },
+      { id: "b", role: "assistant", text: "2" },
+    ]);
+    expect(out.map((m) => [m.id, m.author.role, m.content.parts[0]])).toEqual([
+      ["a", "user", "1"],
+      ["b", "assistant", "2"],
+    ]);
   });
 });
