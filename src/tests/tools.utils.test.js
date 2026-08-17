@@ -4,6 +4,7 @@ import {
   serializeMessage,
   buildPromptWithTools,
   parseToolCallReply,
+  toUpstreamMessage,
 } from "../utils/tools.util.js";
 
 const READ_TOOL = {
@@ -120,7 +121,7 @@ describe("parseToolCallReply", () => {
 describe("buildPromptWithTools", () => {
   it("includes tool schema and instruction when tools present", () => {
     const messages = [{ role: "user", content: "Read notes.txt" }];
-    const prompt = buildPromptWithTools(messages, [READ_TOOL]);
+    const { prompt } = buildPromptWithTools(messages, [READ_TOOL]);
     expect(prompt).toContain("<available_tools>");
     expect(prompt).toContain("tool_call");
     expect(prompt).toContain("User: Read notes.txt");
@@ -129,9 +130,40 @@ describe("buildPromptWithTools", () => {
 
   it("omits tool block when no tools", () => {
     const messages = [{ role: "user", content: "Hello" }];
-    const prompt = buildPromptWithTools(messages, []);
+    const { prompt } = buildPromptWithTools(messages, []);
     expect(prompt).not.toContain("<available_tools>");
     expect(prompt).toContain("User: Hello");
+  });
+
+  it("uses the forcing reminder before any tool has run", () => {
+    const { prompt } = buildPromptWithTools(
+      [{ role: "user", content: "What is in notes.txt?" }],
+      [READ_TOOL],
+    );
+    expect(prompt).toContain("No tool has run yet");
+    // must not invite the model to reuse results it does not have
+    expect(prompt).not.toMatch(/Do NOT call the tool again/);
+  });
+
+  it("switches to the anti-repetition reminder once a tool_result exists", () => {
+    const { prompt } = buildPromptWithTools(
+      [
+        { role: "user", content: "What is in notes.txt?" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "c1", type: "function", function: { name: "Read", arguments: '{"path":"notes.txt"}' } },
+          ],
+        },
+        { role: "tool", tool_call_id: "c1", content: "Buy milk" },
+      ],
+      [READ_TOOL],
+    );
+    expect(prompt).toContain("Do NOT call the tool again");
+    expect(prompt).not.toContain("No tool has run yet");
+    // it still has to explain how to call a tool for genuinely new information
+    expect(prompt).toContain("<tool_call");
   });
 
   it("round-trips the full tool-call conversation", () => {
@@ -154,8 +186,58 @@ describe("buildPromptWithTools", () => {
         content: "Buy milk\nCall dentist",
       },
     ];
-    const prompt = buildPromptWithTools(messages, [READ_TOOL]);
+    const { prompt } = buildPromptWithTools(messages, [READ_TOOL]);
     expect(prompt).toContain("call_tuefggdxl");
     expect(prompt).toContain("Buy milk");
+  });
+});
+
+describe("toUpstreamMessage", () => {
+  it("sends a tool result as a user turn", () => {
+    // Upstream rejects author.role "tool"; the result must travel as user text.
+    const out = toUpstreamMessage({
+      role: "tool",
+      tool_call_id: "toolu_1",
+      content: "file body",
+    });
+    expect(out.role).toBe("user");
+    expect(out.text).toBe('<tool_result id="toolu_1">file body</tool_result>');
+  });
+
+  it("folds tool_calls into the assistant's text", () => {
+    // Passing the message through untouched sends an empty part and drops the
+    // call from the transcript entirely.
+    const out = toUpstreamMessage({
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          id: "call_1",
+          type: "function",
+          function: { name: "Read", arguments: '{"path":"a.txt"}' },
+        },
+      ],
+    });
+    expect(out.role).toBe("assistant");
+    expect(out.text).toContain('<tool_call id="call_1" name="Read">');
+    expect(out.text).toContain('{"path":"a.txt"}');
+  });
+
+  it("keeps plain messages unchanged", () => {
+    expect(toUpstreamMessage({ role: "user", content: "hi" })).toEqual({
+      role: "user",
+      text: "hi",
+    });
+    expect(toUpstreamMessage({ role: "system", content: "be terse" })).toEqual({
+      role: "system",
+      text: "be terse",
+    });
+  });
+
+  it("never emits a role upstream does not accept", () => {
+    const roles = ["user", "assistant", "system", "tool"].map(
+      (role) => toUpstreamMessage({ role, content: "x" }).role,
+    );
+    expect(new Set(roles)).toEqual(new Set(["user", "assistant", "system"]));
   });
 });

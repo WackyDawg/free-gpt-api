@@ -1,3 +1,9 @@
 /node_modules
 .env
 doc
+# Browser session exports contain reusable authentication credentials.
+src/cookies/*.json
+!src/cookies/.gitkeep
+# Local network/protocol captures may contain sensitive conversation metadata.
+artifacts/*.jsonl
+artifacts/*.json

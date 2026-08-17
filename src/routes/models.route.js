@@ -32,6 +32,14 @@ const MODELS = [
     created: 1740614400,
   },
   {
+    id: "gpt-5-6-thinking",
+    _slug: "gpt-5-6-thinking",
+    max_tokens: 34834,
+    owned_by: "openai",
+    object: "model",
+    created: 1740614400,
+  },
+  {
     id: "gpt-5-thinking-mini",
     _slug: "gpt-5-t-mini",
     max_tokens: 34834,

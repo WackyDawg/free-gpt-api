@@ -5,6 +5,7 @@
   "main": "test.js",
   "scripts": {
     "start": "node src/server.js",
+    "capture:network": "node scripts/capture-chatgpt-network.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },

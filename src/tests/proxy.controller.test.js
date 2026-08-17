@@ -1,15 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 
-vi.mock("../utils/browser.util.js", () => {
-  const ChatGPTClient = vi.fn();
-  ChatGPTClient.prototype.chat = vi.fn();
-  return { ChatGPTClient };
+vi.mock("../utils/browser.pool.js", async (importOriginal) => {
+  const actual = await importOriginal();
+  const ChatGPTClientPool = vi.fn();
+  ChatGPTClientPool.prototype.chat = vi.fn();
+  ChatGPTClientPool.prototype.stats = vi.fn(() => ({ workers: 1, idle: 1 }));
+  return { ...actual, ChatGPTClientPool };
 });
 
 const { default: app } = await import("../app.js");
-const { ChatGPTClient } = await import("../utils/browser.util.js");
-const mockChat = ChatGPTClient.prototype.chat;
+const { ChatGPTClientPool } = await import("../utils/browser.pool.js");
+const mockChat = ChatGPTClientPool.prototype.chat;
 
 const READ_TOOL = {
   type: "function",
@@ -37,13 +39,40 @@ describe("POST /v1/chat/completions", () => {
     expect(res.body.error.type).toBe("invalid_request_error");
   });
 
-  it("400 when stream: true", async () => {
-    mockChat.mockResolvedValue("ok");
+  it("streams chat.completion.chunk events when stream: true", async () => {
+    mockChat.mockResolvedValue("hello there");
     const res = await post({
       messages: [{ role: "user", content: "hi" }],
       stream: true,
     });
-    expect(res.status).toBe(400);
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toMatch(/text\/event-stream/);
+
+    const chunks = res.text
+      .split("\n\n")
+      .filter((block) => block.startsWith("data: ") && !block.includes("[DONE]"))
+      .map((block) => JSON.parse(block.slice(6)));
+
+    expect(chunks[0].choices[0].delta.role).toBe("assistant");
+    expect(chunks.map((c) => c.choices[0]?.delta?.content ?? "").join("")).toBe("hello there");
+    expect(chunks.some((c) => c.choices[0]?.finish_reason === "stop")).toBe(true);
+    expect(res.text.trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+
+  it("streams tool_calls when stream: true", async () => {
+    mockChat.mockResolvedValue(
+      `<tool_call id="call_abc" name="Read">{"path":"notes.txt"}</tool_call>`,
+    );
+    const res = await post({
+      messages: [{ role: "user", content: "read notes" }],
+      tools: [READ_TOOL],
+      stream: true,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('"tool_calls"');
+    expect(res.text).toContain('"finish_reason":"tool_calls"');
   });
 
   it("returns a normal text completion", async () => {
@@ -135,5 +164,52 @@ describe("POST /v1/chat/completions", () => {
     mockChat.mockResolvedValue("hello");
     const res = await post({ messages: [{ role: "user", content: "hi" }] });
     expect(res.body.id).toMatch(/^chatcmpl-/);
+  });
+});
+
+describe("thinking effort is only sent to models that accept it", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("drops reasoning_effort for a non-thinking model", async () => {
+    // opencode sends reasoning_effort on every request. Forwarding it to a
+    // model without a reasoning mode makes upstream reject the whole body
+    // ("Invalid conversation body") and leaves the browser tab unable to serve
+    // the next request.
+    mockChat.mockResolvedValue("ok");
+    await post({
+      model: "gpt-5.3",
+      reasoning_effort: "medium",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(mockChat.mock.calls[0][3]).toBeUndefined();
+  });
+
+  it("drops thinking_effort for a non-thinking model", async () => {
+    mockChat.mockResolvedValue("ok");
+    await post({
+      model: "gpt-5.3",
+      thinking_effort: "medium",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(mockChat.mock.calls[0][3]).toBeUndefined();
+  });
+
+  it("passes effort through for a thinking model", async () => {
+    mockChat.mockResolvedValue("ok");
+    await post({
+      model: "gpt-5-6-thinking",
+      reasoning_effort: "medium",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(mockChat.mock.calls[0][3]).toBe("medium");
+  });
+
+  it("defaults a thinking model to extended when no effort is given", async () => {
+    mockChat.mockResolvedValue("ok");
+    await post({
+      model: "gpt-5-6-thinking",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(mockChat.mock.calls[0][3]).toBe("extended");
   });
 });

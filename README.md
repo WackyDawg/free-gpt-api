@@ -1,11 +1,11 @@
-# ChatGPT OpenAI-Compatible Proxy
+# ChatGPT Anthropic- and OpenAI-Compatible Proxy
 
 > [!TIP]
 > Check our [Project Roadmap](ROADMAP.md) for current progress and upcoming features.
 
-**Goal:** I aim to achieve full Anthropic API parity so this proxy can be hooked up to the **leaked Claude Code source code**, allowing it to serve as a complete replacement for the Anthropic API.
+A Node.js proxy server that exposes both an **Anthropic Messages API** (`/v1/messages`) and an **OpenAI Chat Completions API** (`/v1/chat/completions`), backed by an authenticated ChatGPT browser session (Puppeteer). Point **Claude Code CLI**, **Codex**, or **opencode** at it — see [Connecting CLI clients](#connecting-cli-clients).
 
-A Node.js proxy server that exposes an **OpenAI-compatible REST API** backed by a headless ChatGPT browser session (Puppeteer). Supports plain chat completions and full **tool/function calling** via a structured prompt translation layer.
+Supports streaming on both surfaces and full **tool/function calling** via a structured prompt translation layer.
 
 ---
 
@@ -21,7 +21,7 @@ Client (OpenAI SDK / curl)
         ▼
   browser.util.js (ChatGPTClient)
         │  Types prompt into chatgpt.com, intercepts auth headers,
-        │  calls /backend-anon/f/conversation via in-page fetch
+        │  calls /backend-api/f/conversation via in-page fetch
         ▼
   ChatGPT (chatgpt.com)
         │  Returns plain text — either an answer or a <tool_call> block
@@ -49,6 +49,7 @@ src/
 └── utils/
     ├── browser.util.js          # ChatGPTClient — Puppeteer browser automation
     ├── tools.utils.js           # Tool schema serialisation + tool_call reply parsing
+    ├── tool-guard.util.js       # Detects fabricated / repeated tool calls, retries once
     ├── token.util.js            # Token counting via js-tiktoken (cl100k_base)
     └── proxy.util.js            # Proxy utilities
 ```
@@ -64,12 +65,172 @@ npm start          # starts on PORT env var or 3000
 
 On startup the server launches a Chromium window, navigates to `chatgpt.com`, and waits for the prompt textarea. If Cloudflare is active this may take up to 60 seconds. The browser stays alive and is reused for all subsequent requests.
 
+### Reusing an authenticated browser session
+
+Place a Chromium/ChatGPT cookie export at `src/cookies/chatgpt.com.cookies.json` (or set `CHATGPT_COOKIES_PATH` to another local path). The server loads these cookies into its isolated browser context and uses the authenticated `/backend-api/f/conversation` request. Cookie exports are credentials: keep them out of source control, rotate them if they have been shared, and never expose them to clients.
+
+The `gpt-5-6-thinking` model is available through the same endpoint. Set `thinking_effort` (for example, `"extended"`) in the request body to pass the effort setting through to ChatGPT.
+
+To inspect the browser transport interactively, run `npm run capture:network`. A visible authenticated browser opens; submit the prompt yourself, then press Enter in the terminal. Sanitized request/response and WebSocket lifecycle/frame metadata (including worker/iframe sockets via CDP) is written to `artifacts/chatgpt-network.jsonl`; credentials and prompt/frame contents are not recorded.
+
 ```
 Server running on port 3000
 Initializing browser...
 [init] waiting for #prompt-textarea...
 [init] ready
 ```
+
+---
+
+## Connecting CLI clients
+
+The proxy exposes two surfaces over the same browser session:
+
+| Surface | Endpoints | Clients |
+| --- | --- | --- |
+| Anthropic Messages | `POST /v1/messages`, `POST /v1/messages/count_tokens` | Claude Code CLI, opencode (anthropic provider) |
+| OpenAI Chat Completions | `POST /v1/chat/completions`, `GET /v1/models` | Codex, opencode (openai-compatible provider), any OpenAI SDK |
+
+Both support `stream: true`. Because the upstream browser transport resolves
+with a complete reply, streaming is emitted as a correctly ordered chunk
+sequence rather than true token-by-token output — clients parse it normally,
+but text appears in one burst at the end.
+
+### Authentication
+
+`ANTHROPIC_AUTH_TOKEN` is empty by default, so nothing is required for a local
+setup. Set it to require a shared secret, accepted as `x-api-key`,
+`Authorization: Bearer <token>`, or `anthropic-auth-token`.
+
+### Model routing
+
+Claude clients ask for `claude-opus-*`, `claude-sonnet-*`, `claude-3-5-haiku-*`.
+Each class routes to a backend model from `GET /v1/models`:
+
+```bash
+MODEL_OPUS=gpt-5-6-thinking     # Claude Code's main model
+MODEL_SONNET=gpt-5.3
+MODEL_HAIKU=gpt-5.3-nano        # background/summarisation calls
+```
+
+Any other model string is passed through verbatim, so you can target a backend
+model directly.
+
+### Claude Code CLI
+
+```powershell
+# PowerShell
+$env:ANTHROPIC_BASE_URL="http://localhost:3000"; claude
+```
+
+```bash
+# bash/zsh
+ANTHROPIC_BASE_URL="http://localhost:3000" claude
+```
+
+Add `ANTHROPIC_AUTH_TOKEN="<token>"` to both if you enabled authentication.
+
+### Codex
+
+Point it at the OpenAI surface:
+
+```bash
+OPENAI_BASE_URL="http://localhost:3000/v1" OPENAI_API_KEY="unused" codex
+```
+
+### opencode
+
+In `opencode.json`, either surface works:
+
+```json
+{
+  "provider": {
+    "free-gpt-api": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "http://localhost:3000/v1" },
+      "models": { "gpt-5.3": {}, "gpt-5-6-thinking": {} }
+    }
+  }
+}
+```
+
+### Concurrency
+
+Requests are served by a pool of browser tabs, so several agents (or several
+subagents of one agent) can work at once:
+
+```bash
+POOL_SIZE=3      # tabs serving requests in parallel
+MAX_QUEUE=32     # requests allowed to wait before the proxy returns 429
+```
+
+Each tab handles one request at a time — that lock is load-bearing, since a
+tab's request interceptor holds per-request state that two concurrent requests
+would cross-wire. Concurrency comes from having more tabs, never from relaxing
+it. Because the design is stateless (full history is re-sent on every request),
+any tab can serve any request.
+
+When all tabs are busy, requests queue. Past `MAX_QUEUE` the proxy returns
+`429` with `Retry-After` rather than letting every client sit in an unbounded
+queue and time out. If a client disconnects, its queued request is dropped
+before it starts; a request already running in the browser finishes and frees
+its tab normally.
+
+`GET /health` reports live pool state:
+
+```json
+{ "status": "ok",
+  "pool": { "workers": 3, "idle": 2, "busy": 1, "queued": 0,
+            "queueLimit": 32, "served": 41, "rejected": 0 } }
+```
+
+All tabs share one ChatGPT account, so upstream rate limits are shared. Tune
+`POOL_SIZE` to what the account tolerates.
+
+### Tool calling
+
+Neither surface has native function calling upstream — tools are translated
+into a structured prompt block and the reply is parsed back out (see
+[Tool Calling](#tool-calling)). Anthropic `tool_use` / `tool_result` blocks and
+OpenAI `tool_calls` both round-trip through the same translation layer, so tool
+ids and arguments are preserved across turns.
+
+### Tool-call guard
+
+Because tool compliance is prompt-based rather than native, the model does not
+always follow the protocol. Two failures matter in an agent loop:
+
+| Failure | What it looks like | Why it hurts |
+| --- | --- | --- |
+| **Fabricated result** | Answers in prose and invents the outcome: *"I checked `/workspace/notes.txt`, and the file does not exist."* | The model has no filesystem — that is a confident false report. |
+| **Repeated call** | Re-issues a call whose `<tool_result>` is already in the transcript. | Read → Read → Read forever. |
+
+`src/utils/tool-guard.util.js` inspects every reply before it is returned and
+issues **at most one** corrective retry:
+
+- **No tool call + a fabricated-result claim** → retried with a correction that
+  forces a call. The detector is deliberately conservative: an evidence-shaped
+  claim (*"I checked…"*, *"does not exist"*, *"not found"*, *"I don't have
+  access"*) and a concrete target (a path, a `command`, or a word like *file* /
+  *directory*) must appear in the **same sentence**, and questions, plans
+  (*"let me read…"*) and conditionals (*"if the file does not exist…"*) never
+  fire it. Prose that merely mentions a filename is left alone.
+- **A call whose exact `(name, arguments)` pair already has a `tool_result`**
+  (compared key-order- and whitespace-insensitively) → retried with an
+  instruction to answer from the result it already has.
+
+If the retry does not improve things — or fails upstream — the original reply is
+returned rather than an error, and the guard logs which case fired. The retry
+budget is spent at most once per request, so a request never costs more than two
+upstream calls. The reminder appended to the prompt also comes in two variants
+(forcing before any tool has run, anti-repetition once results are present),
+since one block trying to do both jobs is what made these failure modes trade
+off against each other.
+
+| Env var | Default | Effect |
+| --- | --- | --- |
+| `TOOL_GUARD` | `true` | Set to `false` to disable the guard entirely and return the model's first reply verbatim. |
+| `TOOL_GUARD_MAX_RETRIES` | `1` | Extra attempts allowed when a guard fires. `0` detects without retrying; hard-capped at `2`. |
 
 ---
 
