@@ -31,6 +31,7 @@ export class ChatGPTClient {
     this._queue = Promise.resolve();
     this._captureNextHeaders = null;
     this._nativeRequestOptions = null;
+    this._nativeUploadWaiter = null;
     this._initPromise = null;
     this.tap = null;
     this.busy = false;
@@ -40,6 +41,28 @@ export class ChatGPTClient {
   }
 
   _setupInterceptor() {
+    this.page.on("response", (response) => {
+      if (!/\/backend-api\/files\/process_upload_stream(?:\?|$)/.test(response.url())) {
+        return;
+      }
+      const waiter = this._nativeUploadWaiter;
+      if (!waiter) return;
+      this._nativeUploadWaiter = null;
+      void response.text().then(
+        (body) => {
+          if (
+            response.status() >= 200 &&
+            response.status() < 300 &&
+            body.includes("file.processing.completed")
+          ) {
+            waiter.resolve();
+          }
+          else waiter.reject(new Error(`native big-paste upload failed: ${response.status()}`));
+        },
+        () => waiter.reject(new Error("native big-paste upload response could not be read")),
+      );
+    });
+
     this.page.on("request", async (req) => {
       const type = req.resourceType();
       const url = req.url();
@@ -69,24 +92,45 @@ export class ChatGPTClient {
             // structured payload is swapped into its own request here.
             if (options.wireMessages?.length) {
               const template = Array.isArray(body.messages) ? body.messages[0] : null;
+              const templateMetadata = { ...(template?.metadata || {}) };
+              delete templateMetadata.attachments;
               const built = options.wireMessages.map((m) => ({
                 ...(template || {}),
                 id: m.id,
                 author: { role: m.role },
                 content: { content_type: "text", parts: [m.text] },
-                metadata: { ...(template?.metadata || {}) },
+                metadata: { ...templateMetadata },
               }));
-              // A turn's structured payload can carry the same oversized tool
-              // results / handler bodies that would make ChatGPT reject an
-              // inline conversation body; offload anything over threshold to
-              // a big-paste attachment before it goes out.
-              body.messages = (
-                await offloadLargeMessages(
-                  { messages: built },
-                  (text) => uploadBigPaste(this.page, text),
-                  { cache: this._bigPasteCache },
-                )
-              ).messages;
+              if (options.nativeBigPaste) {
+                const nativeAttachments = (body.messages || []).flatMap((message) =>
+                  message?.metadata?.attachments || [],
+                );
+                if (!nativeAttachments.length) {
+                  throw new Error("ChatGPT did not create a native attachment");
+                }
+                // A large text paste has its own oversized message to empty out;
+                // a binary file upload has none, so its attachments ride the last
+                // user message while its prompt text stays inline.
+                const largeIndex = built.findLastIndex(
+                  (message) => Buffer.byteLength(message.content?.parts?.join("") || "", "utf8") >= 40_000,
+                );
+                const targetIndex = largeIndex >= 0 ? largeIndex : built.length - 1;
+                if (largeIndex >= 0) built[targetIndex].content.parts = [""];
+                built[targetIndex].metadata.attachments = nativeAttachments;
+                body.messages = built;
+              } else {
+                // A turn's structured payload can carry the same oversized tool
+                // results / handler bodies that would make ChatGPT reject an
+                // inline conversation body; offload anything over threshold to
+                // a big-paste attachment before it goes out.
+                body.messages = (
+                  await offloadLargeMessages(
+                    { messages: built },
+                    (text) => uploadBigPaste(this.page, text),
+                    { cache: this._bigPasteCache },
+                  )
+                ).messages;
+              }
             }
             postData = JSON.stringify(body);
           } catch (err) {
@@ -300,13 +344,103 @@ export class ChatGPTClient {
     }
   }
 
+  async _pastePrompt(text) {
+    const clipboardReady = await this.page.evaluate(async (value) => {
+      try {
+        await navigator.clipboard.writeText(value);
+        return true;
+      } catch {
+        return false;
+      }
+    }, text);
+    if (clipboardReady) {
+      await this.page.focus("#prompt-textarea");
+      await this.page.keyboard.down("Control");
+      await this.page.keyboard.press("v");
+      await this.page.keyboard.up("Control");
+      return;
+    }
+
+    const pasted = await this.page.evaluate((value) => {
+      const el = document.querySelector("#prompt-textarea");
+      if (!el) return false;
+      el.focus();
+      const data = new DataTransfer();
+      data.setData("text/plain", value);
+      el.dispatchEvent(new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: data,
+      }));
+      return true;
+    }, text);
+    if (!pasted) throw new Error("prompt textarea not found");
+  }
+
+  /**
+   * Attaches binary files (zip, pdf, images, …) by setting them on the
+   * composer's hidden file input and dispatching the events the app listens
+   * for. ChatGPT then runs its OWN authenticated upload (ace_upload) — the same
+   * biscuit-attached path the paste trick uses for text, so we never handle the
+   * upload token ourselves. Each file is decoded from base64 inside the page.
+   *
+   * @param {{ filename: string, mime_type: string, base64: string }[]} files
+   */
+  async _attachFiles(files) {
+    for (const file of files) {
+      const uploaded = this._waitForNativeUpload();
+      const ok = await this.page.evaluate(
+        (name, mime, b64) => {
+          const input = document.querySelector('input[type="file"]');
+          if (!input) return false;
+          const binary = atob(b64);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+          const f = new File([bytes], name, { type: mime || "application/octet-stream" });
+          const dt = new DataTransfer();
+          dt.items.add(f);
+          input.files = dt.files;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+          return true;
+        },
+        file.filename,
+        file.mime_type,
+        file.base64,
+      );
+      if (!ok) throw new Error("composer file input not found");
+      await uploaded; // wait for ChatGPT's native upload to finish processing
+    }
+  }
+
+  async _waitForNativeUpload() {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this._nativeUploadWaiter = null;
+        reject(new Error("native big-paste upload timeout"));
+      }, 30_000);
+      this._nativeUploadWaiter = {
+        resolve: () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      };
+    });
+  }
+
   async _doChat(
     messages,
     mode = "default",
     modelSlug = "auto",
     thinkingEffort,
+    options = {},
   ) {
     const page = this.page;
+    const attachFiles = Array.isArray(options.attachFiles) ? options.attachFiles : [];
 
     const messageList = Array.isArray(messages)
       ? messages
@@ -323,13 +457,28 @@ export class ChatGPTClient {
     const useNativeRequest = modelSlug === "gpt-5-6-thinking";
 
     // Both paths carry the structured list in the body, so the composer text is
-    // only a trigger. It stays as the real question so a failed rewrite
-    // degrades to a sensible single-turn prompt.
+    // only a trigger to harvest fresh headers — the real payload is swapped in
+    // (interceptor) or sent by a separate fetch. A large message typed into the
+    // composer makes ChatGPT's UI auto-convert it to its own attachment, so the
+    // expected /backend-api/f/conversation POST never fires and header capture
+    // times out. Keep the real question for small messages (a failed rewrite
+    // then still degrades sensibly); use a tiny trigger for large ones.
     const wireMessages = messageList
       .map((m) => ({ ...toUpstreamMessage(m), id: randomUUID() }))
       .filter((m) => m.text);
 
-    const submissionText = lastUserMessage;
+    const largePrompt = [...wireMessages]
+      .reverse()
+      .find((message) => Buffer.byteLength(message.text || "", "utf8") >= 40_000)?.text;
+    // The native path (page issues the request so its own upload biscuit is
+    // attached) is needed for a large text paste OR any binary file upload.
+    const nativeBigPaste = !useNativeRequest && (Boolean(largePrompt) || attachFiles.length > 0);
+    const TRIGGER_MAX = 2000;
+    const submissionText = largePrompt
+      ? largePrompt
+      : typeof lastUserMessage === "string" && lastUserMessage.length <= TRIGGER_MAX
+        ? lastUserMessage
+        : "continue";
 
     // Last line of defence: a rejected turn leaves the tab unable to serve the
     // next request, and callers can still let a stray effort value through.
@@ -347,28 +496,57 @@ export class ChatGPTClient {
     await page.keyboard.press("Backspace");
     const _tClear = _since();
 
+    let headerTimer;
     const headersPromise = new Promise((resolve, reject) => {
-      this._captureNextHeaders = resolve;
-      setTimeout(() => {
+      this._captureNextHeaders = (h) => {
+        clearTimeout(headerTimer);
+        resolve(h);
+      };
+      headerTimer = setTimeout(() => {
         this._captureNextHeaders = null;
         reject(new Error("header intercept timeout"));
       }, 15000);
     });
+    // Safety net: if the trigger sequence below throws before we await this
+    // promise, its timeout rejection would otherwise be unhandled and crash the
+    // whole process. This no-op subscriber keeps it handled; the real value is
+    // still consumed by `await headersPromise`, and errors surface there.
+    headersPromise.catch(() => {});
 
-    if (useNativeRequest) {
-      this._nativeRequestOptions = { modelSlug, thinkingEffort: effort, wireMessages };
+    if (useNativeRequest || nativeBigPaste) {
+      this._nativeRequestOptions = {
+        modelSlug,
+        thinkingEffort: effort,
+        wireMessages,
+        nativeBigPaste,
+      };
     }
     const nativeAssistantSelector = '[data-message-author-role="assistant"]';
-    const nativeInitialCount = useNativeRequest
-      ? await page.$$eval(nativeAssistantSelector, (nodes) => nodes.length)
-      : 0;
+    const nativeInitialCount =
+      useNativeRequest || nativeBigPaste
+        ? await page.$$eval(nativeAssistantSelector, (nodes) => nodes.length)
+        : 0;
 
     // Snapshot known turns before submitting so this request's turn can be
     // attributed. Needed on both paths — a thinking model can leave the SSE
     // body empty and deliver over the WebSocket instead.
     this.tap?.mark();
 
-    await this._insertPrompt(submissionText);
+    if (nativeBigPaste) {
+      // Attach binary files first (each triggers the app's own upload), then
+      // paste a large text prompt (also a native upload) or just type a small
+      // prompt as the composer trigger.
+      if (attachFiles.length) await this._attachFiles(attachFiles);
+      if (largePrompt) {
+        const nativeUpload = this._waitForNativeUpload();
+        await this._pastePrompt(submissionText);
+        await nativeUpload;
+      } else {
+        await this._insertPrompt(submissionText);
+      }
+    } else {
+      await this._insertPrompt(submissionText);
+    }
     const _tInsert = _since();
     // Give React one frame to register the inserted text before Enter submits,
     // rather than a fixed 300ms. If the composer still shows text we proceed
@@ -377,7 +555,7 @@ export class ChatGPTClient {
     await page.keyboard.press("Enter");
     const _tSubmit = _since();
 
-    const headers = await headersPromise;
+    let headers = await headersPromise;
     const _tHeaders = _since();
     if (config.debug) {
       console.log(
@@ -387,20 +565,25 @@ export class ChatGPTClient {
       );
     }
 
-    if (useNativeRequest) {
-      // Read the turn off the WebSocket: `done`/`conversation-turn-complete`
-      // are exact boundaries, so no DOM polling is needed.
+    if (useNativeRequest || nativeBigPaste) {
+      // The page issued the real request itself (thinking model, or a native
+      // big-paste whose attachment carries the app-minted biscuit). We must NOT
+      // fire a second manual fetch \u2014 it would reuse the spent sentinel token and
+      // 403. Read the answer the page's own request produces: off the WebSocket
+      // for a thinking model, otherwise from the rendered DOM.
       let turn = null;
-      try {
-        turn = await this.tap.waitForTurn({ timeoutMs: 180000 });
-        console.log(
-          chalk.cyanBright("===> ") +
-            `[stream] ${turn.itemCount} items encoding=${turn.encoding} len=${turn.text.length}`,
-        );
-      } catch (err) {
-        console.warn(
-          chalk.yellowBright("===> ") + "[stream] " + err.message + " \u2014 falling back to DOM",
-        );
+      if (useNativeRequest) {
+        try {
+          turn = await this.tap.waitForTurn({ timeoutMs: 180000 });
+          console.log(
+            chalk.cyanBright("===> ") +
+              `[stream] ${turn.itemCount} items encoding=${turn.encoding} len=${turn.text.length}`,
+          );
+        } catch (err) {
+          console.warn(
+            chalk.yellowBright("===> ") + "[stream] " + err.message + " \u2014 falling back to DOM",
+          );
+        }
       }
 
       if (turn?.text) return normalize(turn.text);
@@ -408,13 +591,29 @@ export class ChatGPTClient {
       // Fallback: read the rendered message. Racy — the DOM lags the stream.
       await page.waitForFunction(
         ({ selector, count }) => document.querySelectorAll(selector).length > count,
-        { timeout: 60000 },
+        { timeout: 120000 },
         { selector: nativeAssistantSelector, count: nativeInitialCount },
       );
-      const domText = await page.$$eval(nativeAssistantSelector, (nodes) => {
-        const node = nodes[nodes.length - 1];
-        return (node?.innerText || node?.textContent || "").trim();
-      });
+      // Stability loop: the DOM streams in and briefly shows a "Thinking…"
+      // placeholder, so a single read races. Poll until the text settles.
+      const startedAt = Date.now();
+      let previousText = "";
+      let stableReads = 0;
+      let domText = "";
+      while (Date.now() - startedAt < 180000) {
+        domText = await page.$$eval(nativeAssistantSelector, (nodes) => {
+          const node = nodes[nodes.length - 1];
+          return (node?.innerText || node?.textContent || "").trim();
+        });
+        const placeholder = /^thinking(?:[.… ]*)$/i.test(domText);
+        if (domText && !placeholder && domText === previousText) {
+          if (++stableReads >= 2) break;
+        } else {
+          stableReads = 0;
+        }
+        previousText = domText;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
       if (!domText) throw new Error("empty_native_response");
       if (/^thinking(?:[.\u2026 ]*)$/i.test(domText)) {
         throw new Error("thinking_response_timeout");
@@ -444,13 +643,17 @@ export class ChatGPTClient {
     // big-paste attachment before it ever crosses into the page; page.evaluate
     // cannot itself drive a nested page.evaluate for the upload.
     const builtMessages = buildWireMessages(wireMessages, { systemHints, mode });
-    const offloadedMessages = (
-      await offloadLargeMessages(
-        { messages: builtMessages },
-        (text) => uploadBigPaste(page, text),
-        { cache: this._bigPasteCache },
-      )
-    ).messages;
+
+    let offloadedMessages = builtMessages;
+    if (!nativeBigPaste) {
+      offloadedMessages = (
+        await offloadLargeMessages(
+          { messages: builtMessages },
+          (text) => uploadBigPaste(page, text),
+          { cache: this._bigPasteCache },
+        )
+      ).messages;
+    }
 
     const result = await page.evaluate(
       async (p) => {
@@ -464,7 +667,7 @@ export class ChatGPTClient {
           body: JSON.stringify({
             action: "next",
             messages: p.messages,
-            parent_message_id: p.parentId,
+            parent_message_id: p.parentMessageId || p.parentId,
             model: p.modelSlug,
             ...(p.thinkingEffort
               ? { thinking_effort: p.thinkingEffort }
@@ -503,6 +706,7 @@ export class ChatGPTClient {
         headers,
         messages: offloadedMessages,
         parentId: randomUUID(),
+        nativeBigPaste,
         systemHints,
         modelSlug,
         thinkingEffort: effort,
@@ -617,11 +821,11 @@ export class ChatGPTClient {
     }
   }
 
-  chat(messages, mode = "default", modelSlug = "auto", thinkingEffort) {
+  chat(messages, mode = "default", modelSlug = "auto", thinkingEffort, options = {}) {
     const task = this._queue.then(async () => {
       if (!this.page) await this.init();
       try {
-        return await this._doChat(messages, mode, modelSlug, thinkingEffort);
+        return await this._doChat(messages, mode, modelSlug, thinkingEffort, options);
       } catch (err) {
         console.warn(
           chalk.yellowBright("===> ") + "[chat] error:",
@@ -629,7 +833,7 @@ export class ChatGPTClient {
           "— recovering...",
         );
         await this._reset();
-        return await this._doChat(messages, mode, modelSlug, thinkingEffort);
+        return await this._doChat(messages, mode, modelSlug, thinkingEffort, options);
       }
     });
     this._queue = task.catch(() => {});

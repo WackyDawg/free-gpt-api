@@ -64,15 +64,32 @@ export class BigPasteCache {
  */
 export async function uploadBigPaste(page, text, opts = {}) {
   const fileName = opts.fileName || "Pasted text.txt";
+  // Authenticated headers captured from a real page request (Bearer + oai-*).
+  // The create's ingest-vs-library routing keys off the Bearer, so a
+  // cookie-only fetch lands on the wrong (library) storage service.
+  const authHeaders = opts.headers || {};
 
   const result = await page.evaluate(
-    async (content, name, createEndpoint) => {
+    async (content, name, createEndpoint, auth) => {
       const bytes = new TextEncoder().encode(content);
+      // Same-origin JSON POST carrying the captured auth headers, but stripped
+      // to clean auth: request-scoped sentinel/conduit/turnstile tokens are
+      // bound to the conversation call and appear to interfere with the file
+      // API's user-biscuit derivation.
+      const authJson = { ...auth, "content-type": "application/json" };
+      for (const k of Object.keys(authJson)) {
+        const keep =
+          k === "authorization" ||
+          k === "cookie" ||
+          k === "content-type" ||
+          k.startsWith("oai-");
+        if (!keep) delete authJson[k];
+      }
 
       const post = (url, body) =>
         fetch(url, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: authJson,
           body: JSON.stringify(body),
         }).then((r) => r.json());
 
@@ -89,8 +106,11 @@ export async function uploadBigPaste(page, text, opts = {}) {
         selection_method: "generated_big_paste",
         client_resolved_mime_type: "text/plain",
         mime_resolution_source: "filename_extension",
-        store_in_library: true,
-        library_persistence_mode: "opportunistic",
+        // false routes to the non-library ingest service (file_0000… ids on the
+        // sdmntpr… host), which is the file type a conversation attachment can
+        // read. true routes to the library service (file-… ids) that the
+        // conversation cannot resolve — the root of the "file not available" bug.
+        store_in_library: false,
       });
 
       const fileId = created.file_id || created.id;
@@ -103,14 +123,42 @@ export async function uploadBigPaste(page, text, opts = {}) {
       // this cross-origin request needs no cookies.
       const put = await fetch(uploadUrl, {
         method: "PUT",
-        headers: { "x-ms-blob-type": "BlockBlob", "content-type": "text/plain" },
+        headers: {
+          "x-ms-blob-type": "BlockBlob",
+          "x-ms-version": "2020-04-08",
+          "content-type": "text/plain",
+        },
         body: bytes,
       });
 
-      // 3. Finalize.
+      // 3. Finalize via the real endpoint (observed from the UI's big-paste
+      // flow): process_upload_stream. It returns a STREAM, so read it as text
+      // and surface the tail — the processed file only becomes usable once this
+      // stream completes.
       let finalize = null;
       try {
-        finalize = await post(`${createEndpoint}/${fileId}/uploaded`, {});
+        const res = await fetch("/backend-api/files/process_upload_stream", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            file_id: fileId,
+            use_case: "my_files",
+            index_for_retrieval: true,
+            file_name: name,
+            entry_surface: "chat_composer",
+            // Matches the real big-paste finalize exactly: no library_file_info
+            // / origination — an is_temporary_chat ingest file is referenced
+            // directly by the attachment, with no conversation binding.
+            metadata: {
+              store_in_library: false,
+              is_temporary_chat: true,
+              library_eligibility_reason: "eligible",
+              is_project_thread: false,
+            },
+          }),
+        });
+        const text = await res.text();
+        finalize = { status: res.status, ready: text.includes("file_ready"), tail: text.slice(-160) };
       } catch (e) {
         finalize = { error: String(e) };
       }
@@ -119,14 +167,29 @@ export async function uploadBigPaste(page, text, opts = {}) {
         fileId,
         size: bytes.length,
         putStatus: put.status,
-        created,
         finalize,
       };
     },
     text,
     fileName,
     CREATE_ENDPOINT,
+    authHeaders,
   );
+
+  // Structural probe of the handshake (no secrets) so the real create/finalize
+  // shapes can be confirmed from logs and the field access tightened.
+  try {
+    console.log(
+      "===> [bigpaste] " +
+        JSON.stringify({
+          error: result?.error,
+          fileId: result?.fileId,
+          putStatus: result?.putStatus,
+          finalizeKeys: result?.finalize ? Object.keys(result.finalize) : null,
+          finalize: result?.finalize,
+        }).slice(0, 1400),
+    );
+  } catch {}
 
   if (!result || result.error || !result.fileId) {
     return null;
@@ -166,7 +229,7 @@ export async function offloadLargeMessages(body, upload, opts = {}) {
     // Reuse a prior upload of the identical prompt when we can.
     let attachment = cache?.get(text) || null;
     if (!attachment) {
-      attachment = await upload(text);
+      attachment = await upload(text, message.id);
       if (attachment && cache) cache.set(text, attachment);
     }
     if (!attachment) continue; // upload failed; leave the message inline

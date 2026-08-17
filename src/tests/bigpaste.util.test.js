@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { BigPasteCache, offloadLargeMessages } from "../utils/bigpaste.util.js";
 
-function textMessage(text) {
-  return { content: { content_type: "text", parts: [text] }, metadata: {} };
+function textMessage(text, id = "msg_1") {
+  return { id, content: { content_type: "text", parts: [text] }, metadata: {} };
 }
 
 describe("BigPasteCache", () => {
@@ -49,7 +49,9 @@ describe("offloadLargeMessages", () => {
 
     const out = await offloadLargeMessages(body, upload, { thresholdBytes: 50 });
 
-    expect(upload).toHaveBeenCalledWith(big);
+    // upload receives (text, messageId) so the finalize can bind the file to
+    // the message that carries the attachment.
+    expect(upload).toHaveBeenCalledWith(big, "msg_1");
     expect(out.messages[0].content.parts).toEqual([""]);
     expect(out.messages[0].metadata.attachments).toEqual([attachment]);
   });

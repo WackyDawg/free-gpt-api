@@ -558,6 +558,73 @@ Content-Type: application/json
 | `model`      | string | no       | Label for the response. Default: `"chatgpt-proxy"`               |
 | `max_tokens` | number | no       | Max tokens to return. Truncates and sets `finish_reason: length` |
 | `mode`       | string | no       | Trigger specific features (reasoning, deep-research, etc.)       |
+| `files`      | array  | no       | Files to prompt against. See [File uploads](#file-uploads)       |
+
+---
+
+## File uploads
+
+Attach one or more files to prompt against — the model reads the file contents
+and answers your `messages`. Works on both surfaces.
+
+```json
+{
+  "model": "gpt-5.3",
+  "messages": [{ "role": "user", "content": "What does getLicenseKey() return?" }],
+  "files": [{ "filename": "licensing.js", "content": "<the file text>" }]
+}
+```
+
+Each file becomes a leading user message the model reads before your prompt.
+A file large enough to exceed the inline limit is delivered as a **big-paste
+attachment**: the proxy pastes it into ChatGPT's composer so the app performs
+its own authenticated upload, then references the resulting file in the turn.
+Smaller files travel inline. Either way, keep the *question* in `messages` (it
+governs) and the *file* in `files` (reference material the model reads).
+
+### Binary files (zip, pdf, images…)
+
+Non-text files upload through ChatGPT's own file picker. Pass the bytes as
+base64 with a `mime_type`:
+
+```json
+{
+  "model": "gpt-5.3",
+  "messages": [{ "role": "user", "content": "What plugin is in this archive and what are its main files?" }],
+  "files": [{
+    "filename": "plugin.zip",
+    "mime_type": "application/zip",
+    "encoding": "base64",
+    "content": "<base64 of the file>"
+  }]
+}
+```
+
+The proxy sets the file on the composer's file input so the app runs its own
+authenticated upload; the model then reads the file (ChatGPT extracts archives,
+parses PDFs, etc.). A file is treated as binary when `encoding` is `"base64"`
+or its `mime_type` is non-text.
+
+On the Anthropic surface (`/v1/messages`) you may pass the same top-level
+`files` array, or inline `file` content blocks:
+
+```json
+{ "role": "user",
+  "content": [
+    { "type": "text", "text": "Summarize this module." },
+    { "type": "file", "filename": "module.py", "content": "<the file text>" }
+  ] }
+```
+
+Notes and limits:
+- **Model support:** the large-file (big-paste) path runs on non-thinking models
+  (`gpt-5.3`, etc.). On `gpt-5-6-thinking`, large files fall back to the
+  inline/legacy path and may not attach — keep those under the inline limit.
+- **Latency:** a large file drives a real composer paste + upload + rendered
+  read, so it is heavier than an inline turn.
+- **Factual Q&A, not governance:** the model *reads and answers about* an
+  uploaded file well; it does not treat an uploaded file as a governing system
+  prompt.
 
 ---
 

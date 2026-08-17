@@ -162,7 +162,7 @@ export class ChatGPTClientPool {
 
     const worker = await this.acquire(options);
     try {
-      const result = await worker.chat(messages, mode, modelSlug, thinkingEffort);
+      const result = await worker.chat(messages, mode, modelSlug, thinkingEffort, options);
       this._served += 1;
       return result;
     } finally {

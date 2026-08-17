@@ -3,6 +3,7 @@ import chalk from "chalk";
 import { client, abortSignalFor } from "./proxy.controller.js";
 import { estimateTokens } from "../utils/token.util.js";
 import { buildPromptWithTools } from "../utils/tools.util.js";
+import { messagesWithFiles, extractFileBlocks, partitionFiles } from "../utils/files.util.js";
 import { runWithToolGuard } from "../utils/tool-guard.util.js";
 import { config } from "../config/config.js";
 import { MODEL_SLUG_MAP, MODEL_MAX_TOKENS } from "../routes/models.route.js";
@@ -32,6 +33,7 @@ export class MessagesController {
       stream,
       thinking,
       metadata,
+      files,
     } = req.body || {};
 
     if (!Array.isArray(messages) || messages.length === 0) {
@@ -49,7 +51,13 @@ export class MessagesController {
     // with "Invalid conversation body".
     const thinkingEffort = /thinking/i.test(String(backendModel)) ? "extended" : undefined;
 
-    const internalMessages = anthropicMessagesToInternal(messages);
+    // Files may arrive as a top-level `files` array or as inline `file` content
+    // blocks; both become leading user messages the model reads before the
+    // prompt (large ones as native big-paste attachments).
+    const { files: blockFiles, cleanedMessages } = extractFileBlocks(messages);
+    const { textFiles, binaryFiles } = partitionFiles([...(files || []), ...blockFiles]);
+    const withFiles = messagesWithFiles(cleanedMessages, textFiles);
+    const internalMessages = anthropicMessagesToInternal(withFiles);
     const systemText = systemToText(system);
     const internalTools = anthropicToolsToInternal(tools);
 
@@ -78,7 +86,8 @@ export class MessagesController {
     try {
       const signal = abortSignalFor(req, res);
       ({ rawText, text, toolCalls } = await runWithToolGuard({
-        chat: (msgs) => client.chat(msgs, "default", gptSlug, thinkingEffort, { signal }),
+        chat: (msgs) =>
+          client.chat(msgs, "default", gptSlug, thinkingEffort, { signal, attachFiles: binaryFiles }),
         structuredMessages,
         priorMessages: internalMessages,
         tools: internalTools,

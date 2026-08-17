@@ -3,6 +3,7 @@ import chalk from "chalk";
 import { ChatGPTClientPool } from "../utils/browser.pool.js";
 import { estimateTokens } from "../utils/token.util.js";
 import { buildPromptWithTools } from "../utils/tools.util.js";
+import { messagesWithFiles, partitionFiles } from "../utils/files.util.js";
 import { runWithToolGuard } from "../utils/tool-guard.util.js";
 import { config } from "../config/config.js";
 import { MODEL_SLUG_MAP, MODEL_MAX_TOKENS } from "../routes/models.route.js";
@@ -34,6 +35,7 @@ export class ProxyController {
       max_tokens,
       thinking_effort,
       reasoning_effort,
+      files,
     } = req.body;
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
@@ -45,11 +47,16 @@ export class ProxyController {
       });
     }
 
+    // Text files become leading user messages (inline or big-paste); binary
+    // files (zip, pdf, images…) are uploaded via the composer's file input.
+    const { textFiles, binaryFiles } = partitionFiles(files);
+    const withFiles = messagesWithFiles(messages, textFiles);
+
     // Agent clients bring their own system prompt, which ours would compete
     // with, so the built-in one is a fallback for bare clients only.
-    const callerHasSystem = messages.some((m) => m?.role === "system" && m.content);
+    const callerHasSystem = withFiles.some((m) => m?.role === "system" && m.content);
     const { prompt, structuredMessages } = buildPromptWithTools(
-      messages,
+      withFiles,
       tools,
       callerHasSystem ? undefined : config.systemPrompt,
     );
@@ -76,6 +83,7 @@ export class ProxyController {
         chat: (msgs) =>
           client.chat(msgs, mode || "default", gptSlug, effectiveThinkingEffort, {
             signal,
+            attachFiles: binaryFiles,
           }),
         structuredMessages,
         priorMessages: messages,
