@@ -142,6 +142,8 @@ export class ChatGPTClient {
       waitUntil: "domcontentloaded",
       timeout: 90000,
     });
+    await page.bringToFront();
+    await page.evaluate(() => window.focus()).catch(() => {});
 
     console.log(
       chalk.blueBright("===> ") +
@@ -173,6 +175,7 @@ export class ChatGPTClient {
 
       const { browser, page } = await connect({
         headless: process.env.HEADLESS === "true",
+        defaultViewport: null,
         executablePath,
         fingerprint: true,
         turnstile: true,
@@ -184,6 +187,7 @@ export class ChatGPTClient {
           "--disable-gpu",
           "--disable-infobars",
           "--window-position=0,0",
+          "--start-maximized",
           "--ignore-certifcate-errors",
           "--ignore-certifcate-errors-spki-list",
           "--disable-speech-api",
@@ -264,6 +268,23 @@ export class ChatGPTClient {
     }
   }
 
+  /**
+   * Waits until the composer actually reflects the inserted text, up to a small
+   * budget. Replaces a fixed pre-Enter sleep: returns the instant the editor is
+   * non-empty, so a fast page proceeds immediately and a slow one still waits.
+   */
+  async _awaitComposerReady(text, { budgetMs = 400, stepMs = 25 } = {}) {
+    const wanted = (text || "").trim().slice(0, 24);
+    const deadline = Date.now() + budgetMs;
+    while (Date.now() < deadline) {
+      const ready = await this.page
+        .$eval("#prompt-textarea", (el) => (el.innerText || el.value || "").trim().length > 0)
+        .catch(() => false);
+      if (ready) return;
+      await new Promise((r) => setTimeout(r, stepMs));
+    }
+  }
+
   async _doChat(
     messages,
     mode = "default",
@@ -299,12 +320,17 @@ export class ChatGPTClient {
     // next request, and callers can still let a stray effort value through.
     const effort = /thinking/i.test(modelSlug) ? thinkingEffort : undefined;
 
+    // Timing breakdown: how much of a request is the keystroke/UI trigger
+    // versus the model itself. `_t0` is set here; segment marks log below.
+    const _t0 = Date.now();
+    const _since = () => Date.now() - _t0;
+
     await page.focus("#prompt-textarea");
     await page.keyboard.down("Control");
     await page.keyboard.press("a");
     await page.keyboard.up("Control");
     await page.keyboard.press("Backspace");
-    await new Promise((r) => setTimeout(r, 200));
+    const _tClear = _since();
 
     const headersPromise = new Promise((resolve, reject) => {
       this._captureNextHeaders = resolve;
@@ -328,13 +354,23 @@ export class ChatGPTClient {
     this.tap?.mark();
 
     await this._insertPrompt(submissionText);
-    await new Promise((r) => setTimeout(r, 300));
+    const _tInsert = _since();
+    // Give React one frame to register the inserted text before Enter submits,
+    // rather than a fixed 300ms. If the composer still shows text we proceed
+    // immediately; the short poll replaces a blind sleep.
+    await this._awaitComposerReady(submissionText);
     await page.keyboard.press("Enter");
+    const _tSubmit = _since();
 
     const headers = await headersPromise;
-    console.log(
-      chalk.magentaBright("===> ") + "[headers] fresh tokens captured",
-    );
+    const _tHeaders = _since();
+    if (config.debug) {
+      console.log(
+        chalk.magentaBright("===> ") +
+          `[timing:${this.label}] clear=${_tClear}ms insert=${_tInsert}ms ` +
+          `submit=${_tSubmit}ms trigger=${_tHeaders}ms (request fired)`,
+      );
+    }
 
     if (useNativeRequest) {
       // Read the turn off the WebSocket: `done`/`conversation-turn-complete`
@@ -464,11 +500,19 @@ export class ChatGPTClient {
     }
 
     const parsed = parseTurnStream(result.body || "");
+    const _tDone = _since();
     console.log(
       chalk.cyanBright("===> ") +
         `[chat] status=${result.status} encoding=${parsed.encoding} ` +
         `events=${parsed.events} len=${parsed.text.length}`,
     );
+    if (config.debug) {
+      console.log(
+        chalk.magentaBright("===> ") +
+          `[timing:${this.label}] trigger=${_tHeaders}ms response=${_tDone - _tHeaders}ms ` +
+          `total=${_tDone}ms (${Math.round((_tHeaders / _tDone) * 100)}% trigger)`,
+      );
+    }
 
     if (parsed.text) return normalize(parsed.text);
 

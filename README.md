@@ -279,7 +279,115 @@ The entrypoint decodes `CHATGPT_COOKIES_B64` to a file at startup and points
 
 ---
 
+## Remote access with Cloudflare Tunnel
+
+The cheapest and, for this proxy specifically, the most reliable way to reach it
+from anywhere: keep it running on your own machine and put a Cloudflare Tunnel in
+front. No server bill, and — the part that matters — the ChatGPT session keeps
+using your own residential IP, so it looks like the browser it is pretending to
+be. Every hosted option trades that away.
+
+The cost is that the machine has to be awake to answer.
+
+### 1. Set a token first
+
+A tunnel makes the proxy reachable from the public internet. `ANTHROPIC_AUTH_TOKEN`
+in `.env` is what stands between that URL and your ChatGPT account, so set it
+before you open the tunnel, not after:
+
+```powershell
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+```
+
+### 2. Install cloudflared
+
+```powershell
+winget install --id Cloudflare.cloudflared
+```
+
+### 3. Start the proxy, then the tunnel
+
+Two terminals. The proxy must be started from your own terminal — Chrome
+launched from a Node child process gets a hidden window on Windows, and the
+turnstile solver needs a real one:
+
+```powershell
+npm start
+```
+
+Wait for `[pool] ready with N/N workers`, then in a second terminal:
+
+```powershell
+npm run tunnel
+```
+
+cloudflared prints a `https://<random-words>.trycloudflare.com` URL. That is a
+quick tunnel: no Cloudflare account, no domain, live immediately — and a new
+hostname every restart, which is fine for trying it and annoying for daily use.
+
+`npm run tunnel` reuses a proxy that is already listening rather than starting a
+second one, and before opening the tunnel it sends an unauthenticated request to
+confirm the answer is `401`. If it is not, it refuses to expose anything. A proxy
+started before you set `ANTHROPIC_AUTH_TOKEN` is still serving with auth
+disabled — **`.env` is read once at startup, so restart the proxy after changing
+it**, or you will be publishing an open endpoint.
+
+### 4. Point a client at it
+
+```powershell
+$env:ANTHROPIC_BASE_URL = "https://<random-words>.trycloudflare.com"
+$env:ANTHROPIC_AUTH_TOKEN = "<the token from your .env>"
+claude
+```
+
+### A stable hostname
+
+Quick tunnels rotate. For a URL that survives restarts you need a Cloudflare
+account with a domain on it, then a named tunnel:
+
+```powershell
+cloudflared tunnel login
+cloudflared tunnel create free-gpt-api
+cloudflared tunnel route dns free-gpt-api gpt.yourdomain.com
+cloudflared tunnel run --url http://localhost:3000 free-gpt-api
+```
+
+Install it as a Windows service so it comes back after a reboot:
+
+```powershell
+cloudflared service install
+```
+
+For a second lock, put Cloudflare Access in front of the hostname — then the
+endpoint requires an identity check before a request ever reaches the token.
+
+### Keeping it answering
+
+The machine sleeping is the failure mode that will actually bite you. Sleep drops
+the tunnel and suspends Chromium:
+
+```powershell
+powercfg /change standby-timeout-ac 0
+powercfg /change hibernate-timeout-ac 0
+```
+
+Turning the monitor off, or locking the session, is fine — Chrome keeps running.
+It is system sleep that breaks things.
+
+`GET /health` through the tunnel is the quickest way to confirm the whole chain —
+tunnel, proxy, browser pool — is up.
+
+---
+
 ## Deploying to Render
+
+> [!CAUTION]
+> There is no free tier for this workload. Render's free web service is 512 MB
+> RAM and 0.1 CPU and spins down after 15 minutes idle; a headed Chromium needs
+> more memory than that before it loads a page, and every spin-down destroys the
+> logged-in browser session. The Blueprint below specifies a paid Standard
+> instance (2 GB, ~$25/mo) because that is the floor at which this runs at all.
+> If you are not paying for that, use the Cloudflare Tunnel setup above.
 
 `render.yaml` in the repo root is a Blueprint for a single Docker web service:
 Xvfb, headed Chromium and the Express API in one container.

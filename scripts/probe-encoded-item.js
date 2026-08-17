@@ -240,9 +240,10 @@ function record(inner) {
 
 const { browser, page } = await connect({
   headless: false,
+  defaultViewport: null,
   fingerprint: true,
   turnstile: true,
-  args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  args: ["--no-sandbox", "--disable-setuid-sandbox", "--start-maximized"],
 });
 
 const cdp = await page.createCDPSession();
@@ -294,6 +295,8 @@ await page.goto("https://chatgpt.com", {
   waitUntil: "domcontentloaded",
   timeout: 90000,
 });
+await page.bringToFront();
+await page.evaluate(() => window.focus()).catch(() => {});
 
 console.log(chalk.green("\nBrowser ready. Send one prompt to gpt-5-6-thinking manually."));
 console.log(chalk.cyan(`Probe output: ${outputPath}`));

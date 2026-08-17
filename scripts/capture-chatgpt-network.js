@@ -114,9 +114,10 @@ if (!Array.isArray(cookies)) throw new Error("Cookie file must contain a JSON ar
 
 const { browser, page } = await connect({
   headless: false,
+  defaultViewport: null,
   fingerprint: true,
   turnstile: true,
-  args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  args: ["--no-sandbox", "--disable-setuid-sandbox", "--start-maximized"],
 });
 
 // CDP catches sockets created by workers/frames as well as page-level sockets.
