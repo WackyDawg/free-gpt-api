@@ -3,10 +3,8 @@ import { getEncoding } from "js-tiktoken";
 const enc = getEncoding("cl100k_base");
 
 /**
- * Accurately count OpenAI tokens using tiktoken.
- *
  * @param {string} text
- * @returns {number}
+ * @returns {number} tiktoken (cl100k_base) token count
  */
 export function estimateTokens(text) {
   if (!text) return 0;

@@ -2,14 +2,10 @@ import { config } from "../config/config.js";
 import { anthropicError } from "../utils/anthropic.util.js";
 
 /**
- * Optional shared-secret auth for the proxy.
- *
- * Disabled when ANTHROPIC_AUTH_TOKEN is unset, which keeps the default
- * localhost setup zero-config. When set, the token is accepted from any of the
- * headers the supported clients actually send:
- *   - x-api-key            (Claude Code with ANTHROPIC_API_KEY)
- *   - authorization: Bearer (Claude Code with ANTHROPIC_AUTH_TOKEN, Codex, opencode)
- *   - anthropic-auth-token  (explicit override)
+ * Optional shared-secret auth, disabled when ANTHROPIC_AUTH_TOKEN is unset so
+ * the default localhost setup stays zero-config. The token is accepted from
+ * x-api-key, `authorization: Bearer` or anthropic-auth-token, which is what
+ * the supported clients send.
  */
 export function requireAuth(req, res, next) {
   const expected = config.authToken;

@@ -1,27 +1,16 @@
 /**
  * Deterministic guard around a prompt-based (non-native) tool-calling loop.
  *
- * The upstream backend has no function calling: tool schemas are injected into
- * the prompt and the model is *asked* to answer with <tool_call> tags. Asking
- * is not a contract, and two failure modes show up in practice:
+ * Upstream has no function calling — the model is only *asked* to answer with
+ * <tool_call> tags — so two failure modes show up:
  *
- *   1. MISSING CALL     — the model answers in prose and invents the outcome of
- *                         a tool it never called ("I checked /etc/hosts, it
- *                         does not exist"). It has no filesystem, so this is a
- *                         confident false report: the worst possible output for
- *                         an agent loop.
- *   2. REPEATED CALL    — a <tool_result> for an identical call is already in
- *                         the transcript, and the model re-issues the same call
- *                         instead of reading the answer it already has. In an
- *                         agent loop that is an infinite Read -> Read -> Read.
+ *   1. MISSING CALL  — prose that invents the outcome of a tool never called.
+ *   2. REPEATED CALL — a call whose <tool_result> is already in the transcript,
+ *                      which spins the agent loop forever.
  *
  * Prompt wording alone plateaued at ~83% compliance, and the phrasing that
- * fixed (1) is what caused (2). This module replaces that coin flip with a
- * check on the reply we actually got back, plus at most one bounded retry
- * carrying a targeted correction.
- *
- * Everything here except `runWithToolGuard` is a pure function, so the whole
- * detector is unit-testable without a browser session.
+ * fixed (1) caused (2). So the reply is inspected instead, and one bounded
+ * retry carries a targeted correction.
  */
 
 import { parseToolCallReply } from "./tools.util.js";
@@ -34,10 +23,8 @@ export const GUARD_DUPLICATE = "duplicate_call";
 /* -------------------------------------------------------------------------- */
 
 /**
- * First-person claims to have *performed* an inspection. The model cannot have
- * done any of these without emitting a tool call, so the claim is false by
- * construction. Deliberately past/perfect tense only: "I'll check the file" is
- * a plan, not a fabrication.
+ * First-person claims to have performed an inspection — false by construction
+ * without a tool call. Past/perfect tense only: "I'll check" is a plan.
  */
 const INSPECTION_CLAIMS = [
   /\bi (?:just |already |went ahead and )?(?:checked|looked|ran|opened|searched|scanned|inspected|examined|listed|reviewed|verified|confirmed|executed|fetched|browsed|grepped)\b/i,
@@ -48,10 +35,8 @@ const INSPECTION_CLAIMS = [
 ];
 
 /**
- * Verdicts about what exists on a machine the model has never observed.
- * "not found" and friends are only evidence-shaped when they land in the same
- * sentence as a concrete target (see TARGETS), which is what keeps prose that
- * merely mentions a filename from tripping the guard.
+ * Verdicts about what exists on a machine the model has never observed. Only
+ * evidence-shaped alongside a concrete target (see mentionsTarget).
  */
 const EXISTENCE_VERDICTS = [
   /\b(?:does|do|did)(?:\s+n[o']t|\s+not)\s+exist\b/i,
@@ -70,9 +55,8 @@ const EXISTENCE_VERDICTS = [
 ];
 
 /**
- * Refusals that should have been tool calls. Inside an agent loop the tool *is*
- * the access, so "I don't have access to your files" while a Read tool is on
- * the table is a protocol failure, not an honest limitation.
+ * Refusals that should have been tool calls — inside an agent loop the tool
+ * *is* the access, so a disclaimer is a protocol failure.
  */
 const ACCESS_DISCLAIMERS = [
   /\bi (?:do not|don't) have (?:direct )?access\b/i,
@@ -95,15 +79,11 @@ const TARGET_SHAPES = [
   /`[^`\n]+`/, // `inline code` / `ls -la`
 ];
 
-/**
- * Sentences framed as hypotheses, questions, offers or plans are not claims of
- * fact and must never trip the guard. "If the file does not exist, I'll create
- * it" is exactly the kind of sentence a well-behaved agent writes.
- */
+/** Hypotheses, questions, offers and plans assert nothing, so never fire. */
 const HYPOTHETICAL = [
   /\b(?:if|whether|unless|in case|suppose|assuming)\b/i,
-  // NB: "could" is absent on purpose — "I couldn't find it" is a claim, not a
-  // hypothesis, and listing it here would silently disable that detector.
+  // "could" is absent on purpose — "I couldn't find it" is a claim, and
+  // listing it here would silently disable that detector.
   /\b(?:would|might|may|should|will|shall|going to|about to|let me|let's|i'll|i will|next step|plan(?:ning)? to|want me to|shall i)\b/i,
   /\b(?:when|after|before) (?:you|we|i) (?:run|check|read|open|create)\b/i,
 ];
@@ -147,11 +127,9 @@ export function toolNamesOf(tools) {
  * True when a reply that contains no tool call nevertheless asserts something
  * only a tool could have established.
  *
- * Conservative by design — a false positive costs a wasted upstream round trip
- * on an answer that was already correct, so the bar is: an evidence-shaped
- * claim and a concrete target in the *same* sentence, with hypothetical,
- * interrogative and forward-looking sentences excluded outright. Prose that
- * merely mentions a filename ("open notes.txt in your editor") does not fire.
+ * Conservative by design — a false positive wastes an upstream round trip on a
+ * correct answer — so the bar is an evidence-shaped claim and a concrete target
+ * in the *same* sentence.
  *
  * @param {string} replyText  the model's reply
  * @param {Array}  tools      tools offered on this request; no tools, no fabrication
@@ -161,14 +139,12 @@ export function looksLikeFabricatedToolResult(replyText, tools) {
   if (typeof replyText !== "string" || replyText.trim() === "") return false;
 
   const toolNames = toolNamesOf(tools);
-  // Nothing was fabricable if the model had nothing to call.
   if (toolNames.length === 0) return false;
-  // A reply that did call a tool is not a fabrication, whatever else it says.
   if (/<tool_call\b/i.test(replyText)) return false;
 
   for (const sentence of toSentences(replyText)) {
-    if (sentence.endsWith("?")) continue; // a question asserts nothing
-    if (anyMatch(HYPOTHETICAL, sentence)) continue; // plans and conditionals
+    if (sentence.endsWith("?")) continue;
+    if (anyMatch(HYPOTHETICAL, sentence)) continue;
 
     const claimsInspection = anyMatch(INSPECTION_CLAIMS, sentence);
     const claimsVerdict = anyMatch(EXISTENCE_VERDICTS, sentence);
@@ -218,15 +194,14 @@ function callIdentity(call) {
 
 /**
  * Walks the transcript and returns, per call identity, the tool_result text
- * that already answered it. A `tool` message normally carries the call id it
- * belongs to; when it does not, it is attributed to the most recent still
- * unanswered assistant call, which is the only sane reading of the order.
+ * that already answered it. A `tool` message without a call id is attributed
+ * to the oldest still-unanswered call.
  *
  * @returns {Map<string, string>} identity -> result text
  */
 export function resolvedToolResults(priorMessages = []) {
   const byId = new Map(); // call id -> identity
-  const pending = []; // ids emitted but not yet answered, oldest first
+  const pending = []; // emitted but unanswered, oldest first
   const resolved = new Map();
 
   for (const message of Array.isArray(priorMessages) ? priorMessages : []) {
@@ -254,7 +229,6 @@ export function resolvedToolResults(priorMessages = []) {
       if (at !== -1) pending.splice(at, 1);
       continue;
     }
-    // No usable id: answer the oldest outstanding call.
     const next = pending.shift();
     if (next) resolved.set(next.identity, text);
   }
@@ -263,12 +237,8 @@ export function resolvedToolResults(priorMessages = []) {
 }
 
 /**
- * True when this exact (name, arguments) call already has a tool_result in the
- * conversation — i.e. re-issuing it would spin the agent loop with no new
- * information.
- *
- * A prior call that was emitted but never answered is NOT a duplicate: the
- * retry is legitimate there.
+ * True when this exact (name, arguments) call already has a tool_result. A
+ * prior call that was emitted but never answered is not a duplicate.
  */
 export function isDuplicateToolCall(toolCall, priorMessages = []) {
   const identity = callIdentity(toolCall);
@@ -297,9 +267,8 @@ const MAX_ECHOED_RESULT = 4000;
 
 /**
  * The instruction appended before the single retry. Each kind gets its own
- * wording: one forces a call, the other forbids one. Merging them is what made
- * the single reminder block in buildPromptWithTools() unstable — the phrasing
- * that fixed fabrication caused repetition.
+ * wording — one forces a call, the other forbids one — because merging them is
+ * what made the reminder block in buildPromptWithTools() unstable.
  *
  * @param {"fabricated_result"|"duplicate_call"} kind
  * @param {{ tools?: Array, toolCall?: object, result?: string, replyText?: string }} context
@@ -356,12 +325,10 @@ export function correctionPrompt(kind, context = {}) {
  * Runs the model call, inspects the reply, and retries at most `maxRetries`
  * times (default 1) with a targeted correction when a guard fires.
  *
- * The transport call itself stays with the caller: `chat` is a closure over
- * `client.chat(structuredMessages, mode, slug, effort, { signal })`, so both
- * controllers keep that signature and this module stays transport-agnostic.
- *
- * Failure is never introduced by the guard — if the retry throws or comes back
- * no better, the original reply is returned and the guard logs what it saw.
+ * The transport stays with the caller — `chat` is a closure over
+ * `client.chat(...)` — so this module is transport-agnostic. The guard never
+ * introduces a failure: if the retry throws or is no better, the original
+ * reply is returned.
  *
  * @param {object}   options
  * @param {(messages: object[]) => Promise<string>} options.chat
@@ -392,8 +359,7 @@ export async function runWithToolGuard({
     return { ...parsed, rawText, guard: null, retried: false, recovered: false };
   }
 
-  // Decide which guard, if any, fired. At most one correction is ever applied,
-  // so the retry budget cannot be exceeded no matter how the reply is shaped.
+  // At most one correction is ever applied, whatever the reply looks like.
   let kind = null;
   let duplicate = null;
 
@@ -423,8 +389,8 @@ export async function runWithToolGuard({
       { role: "user", content: correction },
     ]);
   } catch {
-    // The retry is best-effort. A transport failure on the second attempt must
-    // not turn a usable first answer into an error for the caller.
+    // Best-effort: a failed retry must not turn a usable first answer into an
+    // error for the caller.
     onGuard?.({ kind, retried: true, recovered: false, reason: "retry_failed" });
     return { ...parsed, rawText, guard: kind, retried: true, recovered: false };
   }
@@ -434,7 +400,6 @@ export async function runWithToolGuard({
   onGuard?.({ kind, retried: true, recovered });
 
   if (!recovered) {
-    // Best available answer wins over an error: keep the first reply.
     return { ...parsed, rawText, guard: kind, retried: true, recovered: false };
   }
   return { ...retryParsed, rawText: retryRaw, guard: kind, retried: true, recovered: true };
@@ -447,7 +412,6 @@ function isBetter(kind, retryParsed, { tools, priorMessages }) {
       // Answered from the existing tool_result: exactly what we asked for.
       return typeof retryParsed.text === "string" && retryParsed.text.length > 0;
     }
-    // A different call is progress; the same call again is not.
     return findDuplicateCall(retryParsed.toolCalls, priorMessages) === null;
   }
 

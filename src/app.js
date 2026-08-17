@@ -7,8 +7,7 @@ import { client } from "./controller/proxy.controller.js";
 
 const app = express();
 
-// Claude Code and Codex can send large tool-result payloads; the 100kb
-// express default rejects them.
+// Claude Code and Codex send tool-result payloads well past the 100kb default.
 app.use(express.json({ limit: "50mb" }));
 
 // Anthropic surface (Claude Code CLI, opencode with an anthropic provider)

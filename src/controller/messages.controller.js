@@ -44,19 +44,17 @@ export class MessagesController {
     const gptSlug = MODEL_SLUG_MAP[backendModel] ?? "auto";
     const modelMaxTokens = MODEL_MAX_TOKENS[backendModel] ?? 16384;
 
-    // Claude Code sends `thinking` for extended-reasoning turns, but the effort
-    // control only exists on thinking models — attaching it to any other model
-    // makes upstream reject the request with "Invalid conversation body". The
-    // client's request alone is not enough; the resolved model has to support it.
+    // The client asking for `thinking` is not enough: the effort control only
+    // exists on thinking models, and elsewhere upstream rejects the request
+    // with "Invalid conversation body".
     const thinkingEffort = /thinking/i.test(String(backendModel)) ? "extended" : undefined;
 
     const internalMessages = anthropicMessagesToInternal(messages);
     const systemText = systemToText(system);
     const internalTools = anthropicToolsToInternal(tools);
 
-    // Agent clients ship their own system prompt describing their tools and
-    // output contract. Prepending ours would put a second, competing persona
-    // ahead of it, so config.systemPrompt is only a fallback for bare clients.
+    // Agent clients ship their own system prompt; ours would compete with it,
+    // so it is only a fallback for bare clients.
     const combinedSystem = systemText || config.systemPrompt;
 
     const { prompt, structuredMessages } = buildPromptWithTools(
@@ -79,9 +77,6 @@ export class MessagesController {
     let toolCalls;
     try {
       const signal = abortSignalFor(req, res);
-      // Upstream has no native function calling, so the reply is verified
-      // rather than trusted: a fabricated tool result, or a call that already
-      // has a <tool_result> above, buys exactly one corrective retry.
       ({ rawText, text, toolCalls } = await runWithToolGuard({
         chat: (msgs) => client.chat(msgs, "default", gptSlug, thinkingEffort, { signal }),
         structuredMessages,
@@ -116,7 +111,6 @@ export class MessagesController {
 
     let { content, stopReason } = replyToContentBlocks(text, toolCalls);
 
-    // Honour max_tokens by truncating text output, matching /v1/chat/completions.
     const limit = maxTokens ? Math.min(maxTokens, modelMaxTokens) : modelMaxTokens;
     let outputTokens = estimateTokens(rawText);
     if (stopReason === "end_turn" && limit && outputTokens > limit) {

@@ -3,16 +3,13 @@ import { ChatGPTClient } from "./browser.util.js";
 import { config } from "../config/config.js";
 
 /**
- * Pool of ChatGPT browser workers.
+ * Pool of ChatGPT browser workers: one Chromium instance hosting N tabs, each
+ * a ChatGPTClient with its own page, interceptor and socket tap.
  *
- * One Chromium instance hosts N tabs; each tab is a ChatGPTClient with its own
- * page, request interceptor and socket tap. That matters: `_captureNextHeaders`
- * and `_nativeRequestOptions` are single-slot fields, so two concurrent
- * requests through one client would cross wires. Concurrency comes from having
- * several clients, never from relaxing the per-client lock.
- *
- * The upstream design is stateless — full history is re-sent on every request —
- * so any worker can serve any request and no affinity is required.
+ * Concurrency comes from having several clients, never from relaxing the
+ * per-client lock — `_captureNextHeaders` and `_nativeRequestOptions` are
+ * single-slot, so two requests through one client cross wires. Full history is
+ * re-sent on every request, so any worker can serve any request.
  */
 
 export class PoolBusyError extends Error {
@@ -55,9 +52,9 @@ export class ChatGPTClientPool {
       this.clients.push(primary);
       this.idle.push(primary);
 
+      // Sequential on purpose: parallel cold tabs all hit the Cloudflare check
+      // at once and are far more likely to be challenged.
       for (let index = 1; index < this.size; index += 1) {
-        // Sequential on purpose: parallel cold tabs all hit the Cloudflare
-        // check at once and are far more likely to be challenged.
         const worker = this._createClient({
           browser: primary.browser,
           label: `w${index}`,

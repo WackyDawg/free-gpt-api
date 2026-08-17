@@ -1,19 +1,12 @@
 /**
- * Parser for ChatGPT's `delta_encoding: v1` event stream.
+ * Parser for ChatGPT's `delta_encoding: v1` event stream, which appears both as
+ * the body of `POST /backend-api/f/conversation` and — unencoded, as raw
+ * slices — in the `encoded_item` field of WebSocket turn frames.
  *
- * The same byte format appears in two places:
- *   - the body of `POST /backend-api/f/conversation` (text/event-stream)
- *   - the `encoded_item` field of conversation-turn-stream WebSocket frames
- *
- * `encoded_item` is NOT encoded — it is a raw slice of that SSE body. Joining
- * the slices in parent_stream_item_id order reproduces the stream verbatim.
- *
- * Wire format
- * -----------
+ * Wire format:
  *   event: delta_encoding      data: "v1"
  *   event: delta               data: { p?, o?, v, c? }
- *   event: message             data: { type: "message_marker" | "input_message"
- *                                    | "message_stream_complete" | ... }
+ *   event: message             data: { type: "message_marker" | ... }
  *   data: [DONE]
  *
  * Delta ops are JSON-Pointer patches against the most recent root object
@@ -62,9 +55,9 @@ function resolveParent(root, parts) {
 }
 
 function applyOp(state, op) {
-  // Both `p` and `o` are sticky: the compact form of a streamed answer is one
-  // {p, o:"append", v} followed by bare {v} continuations. Defaulting a bare
-  // continuation to "add" would overwrite the buffer with the last token.
+  // `p` and `o` are sticky: a streamed answer is one {p, o:"append", v} plus
+  // bare {v} continuations, and defaulting those to "add" would overwrite the
+  // buffer with the last token.
   const path = op.p !== undefined ? op.p : state.stickyPath;
   if (op.p !== undefined) state.stickyPath = op.p;
   const kind = op.o !== undefined ? op.o : state.stickyOp;
@@ -75,7 +68,6 @@ function applyOp(state, op) {
   }
   if (op.o !== undefined) state.stickyOp = op.o;
 
-  // A root-level add installs a whole new envelope.
   if (path === "" || path === undefined) {
     if (kind === "add" && op.v && typeof op.v === "object") {
       state.root = op.v;
@@ -113,13 +105,10 @@ function messageText(message) {
 }
 
 /**
- * True for the assistant message a user would consider "the answer".
- *
- * Thinking models emit several assistant messages per turn: a
- * `reasoning_recap` (what the UI renders as "Thinking…"), optional tool
- * messages, and the final prose on channel "final". Non-thinking models emit
- * the prose with channel null. Matching on content_type + recipient covers
- * both without hardcoding a model slug.
+ * True for the assistant message a user would consider "the answer". Thinking
+ * models emit several per turn (reasoning recap, tool messages, then prose on
+ * channel "final"); matching on content_type + recipient covers both them and
+ * plain models without hardcoding a slug.
  */
 export function isFinalAnswer(message) {
   if (!message || message.author?.role !== "assistant") return false;
@@ -188,10 +177,9 @@ export function parseTurnStream(text) {
     if (payload?.conversation_id) conversationId = payload.conversation_id;
     if (payload?.type === "message_stream_complete") streamComplete = true;
 
-    // Legacy (pre-delta) framing: every event is a full cumulative snapshot
-    // `{ message, conversation_id }` with no `event:` line. Indexing by id
-    // means the last snapshot for a message wins, which is the same semantics.
-    // v1 control envelopes are unaffected — none of them carry `.message`.
+    // Legacy (pre-delta) framing: every event is a full cumulative snapshot,
+    // so indexing by id means the last one wins. v1 control envelopes are
+    // unaffected — none of them carry `.message`.
     if (payload?.message?.id && !payload.type) {
       state.root = payload;
       state.index(payload);

@@ -1,30 +1,27 @@
 /**
  * Translation between the Anthropic Messages API and the internal
- * (OpenAI-shaped) pipeline used by tools.util.js.
+ * (OpenAI-shaped) pipeline used by tools.util.js:
  *
- * Anthropic request -> OpenAI-shaped messages/tools -> buildPromptWithTools
- * ChatGPT reply -> parseToolCallReply -> Anthropic content blocks / SSE events
+ *   Anthropic request -> OpenAI-shaped messages/tools -> buildPromptWithTools
+ *   ChatGPT reply -> parseToolCallReply -> Anthropic blocks / SSE events
  *
- * Reusing the OpenAI shape in the middle means tool calling behaves identically
- * for /v1/messages and /v1/chat/completions — there is one prompt format and
- * one reply parser, not two.
+ * Reusing the OpenAI shape in the middle keeps one prompt format and one reply
+ * parser across /v1/messages and /v1/chat/completions.
  */
 
 import { randomUUID } from "crypto";
 import { config } from "../config/config.js";
 
 /**
- * Routes a Claude model name to a backend model id by class.
- * Claude Code sends names like `claude-opus-4-20250514`,
- * `claude-sonnet-4-5-20250929`, `claude-3-5-haiku-20241022`.
+ * Routes a Claude model name (`claude-sonnet-4-5-20250929`, …) to a backend
+ * model id by class. Anything unrecognised is used verbatim, so callers can
+ * target a specific upstream model.
  */
 export function resolveClaudeModel(name) {
   const lower = typeof name === "string" ? name.toLowerCase() : "";
   if (lower.includes("opus")) return config.modelOpus;
   if (lower.includes("haiku")) return config.modelHaiku;
   if (lower.includes("sonnet")) return config.modelSonnet;
-  // Anything else (including a backend model id passed straight through) is
-  // used verbatim so callers can target a specific upstream model.
   return name || config.modelSonnet;
 }
 
@@ -58,7 +55,6 @@ function blockToText(block) {
       // Never replay prior reasoning back into the prompt.
       return "";
     case "image":
-      // The upstream transport is a text box; images cannot be forwarded.
       return "[image omitted: this proxy forwards text only]";
     case "document":
       return "[document omitted: this proxy forwards text only]";
@@ -115,8 +111,8 @@ export function anthropicMessagesToInternal(messages = []) {
       continue;
     }
 
-    // user (or anything else): tool_result blocks break out into `tool`
-    // messages so the prompt shows each result against its call id.
+    // tool_result blocks break out into `tool` messages so the prompt shows
+    // each result against its call id.
     const texts = [];
     for (const block of content) {
       if (block?.type === "tool_result") {
@@ -186,12 +182,9 @@ export function replyToContentBlocks(text, toolCalls) {
 }
 
 /**
- * Builds the full Anthropic SSE event sequence for a completed reply.
- *
- * The upstream browser transport resolves with the whole reply, so text is
- * emitted as a series of text_delta chunks rather than true token-by-token
- * streaming. The event ordering is exactly what a streaming client expects,
- * which is what matters for compatibility.
+ * Builds the full Anthropic SSE event sequence for a completed reply. The
+ * transport resolves with the whole reply, so this chunks it rather than
+ * streaming token by token; the event ordering is what clients parse.
  *
  * @returns {Array<{ event: string, data: object }>}
  */

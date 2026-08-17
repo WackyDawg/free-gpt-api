@@ -2,19 +2,14 @@ import chalk from "chalk";
 import { parseStreamItems } from "./sse-delta.util.js";
 
 /**
- * Read-only tap on the page's own conversation WebSocket.
+ * Read-only tap on the page's own conversation WebSocket, via CDP: it never
+ * opens a socket and never touches cookies, headers or the `verify` value —
+ * only frames Chrome has already decrypted.
  *
- * Authentication stays entirely inside the browser: this never opens a socket,
- * never reads the `verify` query value, and never touches cookies or headers.
- * It observes frames that Chrome has already decrypted, via CDP.
- *
- * Two things it gives you:
- *   1. Authoritative turn boundaries (`done` / `conversation-turn-complete`),
- *      which replace DOM polling and the "Thinking…" placeholder heuristic.
- *   2. The turn's full event stream. `encoded_item` is a raw slice of the same
- *      `delta_encoding: v1` SSE body the HTTP path serves — joining the slices
- *      in parent_stream_item_id order and running sse-delta.util.js over the
- *      result reproduces the assistant text exactly.
+ * It supplies authoritative turn boundaries (`done` /
+ * `conversation-turn-complete`) in place of DOM polling, plus the turn's event
+ * stream, whose `encoded_item` slices reassemble into the same
+ * `delta_encoding: v1` body the HTTP path serves.
  */
 
 const DEFAULT_TURN_TIMEOUT_MS = 300000;
@@ -36,8 +31,7 @@ class Turn {
     this.conversationId = payload.conversation_id;
     this.turnId = payload.turn_id;
     this.lastActivity = Date.now();
-    // A resumed subscription replays frames (`recovered: true`, `catchups`),
-    // so item ids must be deduped or the answer doubles up.
+    // A resumed subscription replays frames, so dedupe or the answer doubles.
     if (payload.stream_item_id) {
       if (this.seenItemIds.has(payload.stream_item_id)) return;
       this.seenItemIds.add(payload.stream_item_id);
@@ -73,8 +67,7 @@ export class TurnStreamTap {
       this._onFrame(response?.payloadData),
     );
     this.cdp.on("Network.webSocketClosed", () => this._fail("websocket_closed"));
-    // A navigation tears down the CDP session's socket view; callers should
-    // re-attach after page.reload().
+    // A navigation tears down the socket view; re-attach after page.reload().
   }
 
   async detach() {
@@ -101,8 +94,7 @@ export class TurnStreamTap {
     if (!Array.isArray(frames)) frames = [frames];
 
     for (const frame of frames) {
-      // Client-command replies confirm subscription state; useful for health
-      // checks but they carry no turn content.
+      // Replies only confirm subscription state; they carry no turn content.
       if (frame?.type === "reply") {
         const reply = frame.reply || {};
         if (reply.type === "subscribe" && reply.topic_id) {
@@ -147,8 +139,7 @@ export class TurnStreamTap {
     }
 
     if (envelope.type === "conversation-turn-complete") {
-      // Conversation-scoped: no turn_id, so complete every done/streaming turn
-      // on that conversation.
+      // Conversation-scoped: no turn_id, so complete every turn on it.
       const conversationId = inner.conversation_id;
       for (const turn of this.turns.values()) {
         if (turn.conversationId === conversationId) turn.state = "complete";
@@ -161,8 +152,7 @@ export class TurnStreamTap {
   _turn(key) {
     if (!this.turns.has(key)) {
       this.turns.set(key, new Turn(key));
-      // Long-lived proxy: keep only recent turns so items do not accumulate
-      // for the lifetime of the process.
+      // Keep only recent turns; the proxy is long-lived.
       while (this.turns.size > MAX_RETAINED_TURNS) {
         const oldest = this.turns.keys().next().value;
         if (oldest === undefined) break;
@@ -182,8 +172,8 @@ export class TurnStreamTap {
   }
 
   /**
-   * Snapshot turn ids currently known. Call immediately BEFORE submitting a
-   * prompt so the next new turn can be attributed to this request.
+   * Snapshot known turn ids. Call BEFORE submitting a prompt so the next new
+   * turn can be attributed to this request.
    */
   mark() {
     this.knownTurnIds = new Set(this.turns.keys());
@@ -227,7 +217,7 @@ export class TurnStreamTap {
         clearTimeout(idleTimer);
         idleTimer = setTimeout(() => {
           const turn = pick();
-          // Silence after a `done` is normal if complete was missed; accept it.
+          // Silence after a `done` is normal if complete was missed.
           if (turn && turn.state === "done") {
             settle(resolve, this._describe(turn));
             return;
@@ -251,7 +241,7 @@ export class TurnStreamTap {
         settle(reject, new Error(`turn_stream_timeout:${Date.now() - startedAt}ms`));
       }, timeoutMs);
       resetIdle();
-      watcher(); // in case the turn already finished before we started waiting
+      watcher(); // the turn may already have finished
     });
   }
 

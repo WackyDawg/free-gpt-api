@@ -10,9 +10,8 @@ import { MODEL_SLUG_MAP, MODEL_MAX_TOKENS } from "../routes/models.route.js";
 export const client = new ChatGPTClientPool();
 
 /**
- * Aborts when the caller hangs up. This only prevents work that has not
- * started; a request already executing in the browser runs to completion and
- * frees its worker when it finishes.
+ * Aborts when the caller hangs up. Only prevents work that has not started; a
+ * request already executing in the browser runs to completion.
  */
 export function abortSignalFor(req, res) {
   const controller = new AbortController();
@@ -46,9 +45,8 @@ export class ProxyController {
       });
     }
 
-
-    // Only inject the built-in prompt when the caller supplied none of its own;
-    // agent clients bring a system prompt that ours would otherwise compete with.
+    // Agent clients bring their own system prompt, which ours would compete
+    // with, so the built-in one is a fallback for bare clients only.
     const callerHasSystem = messages.some((m) => m?.role === "system" && m.content);
     const { prompt, structuredMessages } = buildPromptWithTools(
       messages,
@@ -60,11 +58,9 @@ export class ProxyController {
       const requestedModel = model || "gpt-5.3";
       const gptSlug = MODEL_SLUG_MAP[requestedModel] ?? "auto";
       const modelMaxTokens = MODEL_MAX_TOKENS[requestedModel] ?? 16384;
-      // Only thinking models accept an effort setting; upstream rejects the
-      // whole request with "Invalid conversation body" if one is attached to
-      // any other model. Clients send this unconditionally — opencode puts
-      // reasoning_effort on every call — so it has to be filtered here rather
-      // than trusted.
+      // Only thinking models accept an effort setting; anywhere else upstream
+      // rejects the request with "Invalid conversation body". Clients send it
+      // unconditionally (opencode puts reasoning_effort on every call).
       const supportsThinking = /thinking/i.test(requestedModel);
       const effectiveThinkingEffort = supportsThinking
         ? thinking_effort || reasoning_effort || "extended"
@@ -76,9 +72,6 @@ export class ProxyController {
 
       const signal = abortSignalFor(req, res);
 
-      // Tool compliance is prompt-based upstream, so the reply is inspected
-      // rather than trusted: an invented tool result or a call whose
-      // <tool_result> is already in the transcript buys one corrective retry.
       const { rawText, text, toolCalls } = await runWithToolGuard({
         chat: (msgs) =>
           client.chat(msgs, mode || "default", gptSlug, effectiveThinkingEffort, {
@@ -176,9 +169,8 @@ export class ProxyController {
   }
 
   /**
-   * Emits an OpenAI chat.completion.chunk stream. The upstream transport
-   * resolves with the whole reply, so text is chunked here rather than
-   * streamed token by token; the chunk sequence is what clients parse.
+   * Emits an OpenAI chat.completion.chunk stream. The transport resolves with
+   * the whole reply, so text is chunked here rather than streamed live.
    */
   _streamCompletion(res, { id, created, model, choice, usage }) {
     res.status(200).set({

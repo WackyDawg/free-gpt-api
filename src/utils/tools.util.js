@@ -1,7 +1,6 @@
 /**
- * Handles the round-trip translation between the OpenAI tool-call wire format
- * and the plain-text representation we inject into the ChatGPT prompt, then
- * parses the model's plain-text reply back into an OpenAI-compatible response.
+ * Round-trip translation between the OpenAI tool-call wire format and the
+ * plain-text representation injected into the ChatGPT prompt.
  */
 
 export function serializeTools(tools) {
@@ -61,18 +60,13 @@ export function hasToolResults(messages) {
 }
 
 /**
- * The directive repeated last, after the conversation. Placed only among the
- * leading system messages it is reliably acknowledged but rarely acted on —
- * the model answers from its own knowledge instead of emitting a call.
- * Restating it in the most recent position is what makes tool use happen
- * without the user asking for it explicitly.
+ * The directive repeated last, after the conversation: among the leading
+ * system messages it is acknowledged but rarely acted on.
  *
- * It comes in two variants because one block cannot do both jobs. "Never claim
- * a file is missing, call the tool" is what lifted the trigger rate, and it is
- * also what made the model re-issue calls it had already run; "use the result
- * you already have" pulls the other way and, before any tool has run, reads as
- * permission not to call one. So: forcing wording while the transcript has no
- * <tool_result>, anti-repetition wording once it does.
+ * Two variants, because one block cannot do both jobs. Forcing wording ("never
+ * claim a file is missing, call the tool") lifts the trigger rate but makes the
+ * model repeat calls; anti-repetition wording pulls the other way and, before
+ * any tool has run, reads as permission not to call one.
  */
 export function toolReminder(messages) {
   const head = `Reminder: you are running inside an automated agent loop with no direct access to files, the shell, the network, or the user's machine. The ONLY way to obtain that information is to call one of the tools listed in <available_tools>.`;
@@ -144,14 +138,9 @@ If you absolutely cannot proceed without more information, only then respond nor
 }
 
 /**
- * Flattens an internal message into something the upstream conversation
- * endpoint accepts.
- *
- * Two things have to happen here. Upstream only knows the roles
- * user/assistant/system, so a `tool` message must travel as a user turn. And
- * a message's tool calls live in `tool_calls`, not in `content` — passing the
- * message through untouched sends an empty part and silently drops the call
- * from the transcript.
+ * Flattens an internal message into something upstream accepts: it only knows
+ * user/assistant/system, so a `tool` message travels as a user turn, and tool
+ * calls must be serialised into the text or they are silently dropped.
  *
  * @returns {{ role: string, text: string }}
  */
