@@ -6,8 +6,17 @@ npm-debug.log
 .vscode
 .gemini
 .claude
+.serena
 dist
 build
 .dockerignore
 Dockerfile
 docker-compose.yml
+
+# Never bake a session credential into an image layer. Supply cookies at run
+# time instead: a Secret File, a bind mount, or CHATGPT_COOKIES_B64.
+src/cookies/*.json
+
+# Not needed at run time; keeps the build context small.
+src/tests
+artifacts

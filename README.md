@@ -246,16 +246,120 @@ docker build -t chatgpt-proxy .
 
 ### 2. Run the container
 
+The cookie export is deliberately excluded from the image (see `.dockerignore`) so
+that a session credential is never baked into a layer you might push somewhere.
+Supply it at run time instead — either as a mount:
+
 ```bash
 docker run -d \
   --name chatgpt-proxy \
   -p 3000:3000 \
   --shm-size=2gb \
+  -v "$(pwd)/src/cookies/chatgpt.com.cookies.json:/run/cookies.json:ro" \
+  -e CHATGPT_COOKIES_PATH=/run/cookies.json \
   chatgpt-proxy
 ```
 
+…or, where only environment variables are available, base64-encoded:
+
+```bash
+docker run -d \
+  --name chatgpt-proxy \
+  -p 3000:3000 \
+  --shm-size=2gb \
+  -e CHATGPT_COOKIES_B64="$(base64 -w0 src/cookies/chatgpt.com.cookies.json)" \
+  chatgpt-proxy
+```
+
+The entrypoint decodes `CHATGPT_COOKIES_B64` to a file at startup and points
+`CHATGPT_COOKIES_PATH` at it, overriding whatever that variable was set to.
+
 > [!IMPORTANT]
 > The `--shm-size=2gb` flag is required. Puppeteer/Chrome uses `/dev/shm` to share data between processes, and the default Docker limit (64MB) is usually too small for stable browser operation.
+
+---
+
+## Deploying to Render
+
+`render.yaml` in the repo root is a Blueprint for a single Docker web service:
+Xvfb, headed Chromium and the Express API in one container.
+
+> [!WARNING]
+> Read this first. The proxy drives your ChatGPT account from the deployment's
+> IP address. Moving a session from your home connection to a datacentre IP in
+> another region is exactly the pattern Cloudflare and OpenAI look for, so
+> expect more frequent challenges than you get locally, and accept that the
+> session — or the account — may be flagged. Deploy an account you can afford
+> to lose, and read `LEGAL_NOTICE.md`.
+
+### 1. Push the repo to GitHub or GitLab
+
+Render builds from a connected git repository. The cookie file is gitignored and
+must stay that way; step 3 supplies it out of band.
+
+### 2. Create the Blueprint
+
+In Render: **New → Blueprint**, pick the repository, and apply. It reads
+`render.yaml` and creates the service with the environment already configured,
+including a generated `ANTHROPIC_AUTH_TOKEN`.
+
+Edit two lines in `render.yaml` before applying if the defaults do not suit you:
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `plan` | `standard` | 2 GB RAM. Chromium plus a virtual display will not fit in the 512 MB `free`/`starter` plans — it OOMs during page load. |
+| `region` | `oregon` | Pick the one closest to where the account normally signs in; a sudden continent change is an extra risk signal. |
+
+### 3. Add the cookies as a Secret File
+
+Blueprints cannot carry secrets, so this step is manual and the first deploy will
+fail authentication without it.
+
+Go to the service → **Environment → Secret Files → Add Secret File**:
+
+- **Filename:** `chatgpt.com.cookies.json`
+- **Contents:** paste your exported cookie JSON verbatim
+
+Render mounts it at `/etc/secrets/chatgpt.com.cookies.json`, which is where
+`CHATGPT_COOKIES_PATH` already points. If the mount ever gives you a permissions
+error (the container runs as the non-root `pptruser`), delete the secret file and
+set `CHATGPT_COOKIES_B64` as a normal environment variable instead — locally,
+`base64 -w0 src/cookies/chatgpt.com.cookies.json` produces the value.
+
+### 4. Deploy and watch the first boot
+
+The first start is slow: image build, then Chromium launch, then a Cloudflare
+check. Logs should reach `[pool] ready with 1/1 workers`. Until they do, `/health`
+answers `200` with an empty pool — that is intentional, so Render's health check
+does not restart the service while the browser is still coming up.
+
+### 5. Point your clients at it
+
+```bash
+export ANTHROPIC_BASE_URL="https://<your-service>.onrender.com"
+export ANTHROPIC_AUTH_TOKEN="<the generated token from Render → Environment>"
+claude
+```
+
+The generated token is not optional in this setup. A Render URL is public, and
+without it anyone who finds the hostname is issuing requests against your
+ChatGPT account.
+
+### Operating notes
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| Deploy exits ~code 137 during boot | Out of memory | Move to a 2 GB plan, keep `POOL_SIZE=1` |
+| Every request returns `auth_expired:401` | Cookies expired or rejected from this IP | Re-export cookies, update the Secret File, redeploy |
+| Boot hangs at `waiting for #prompt-textarea` | Cloudflare challenge is not clearing | Confirm `HEADLESS=false` so Chromium runs headed under Xvfb; try a different region |
+| `429` with `Retry-After` | Queue past `MAX_QUEUE` | Expected backpressure — one browser tab serves one request at a time |
+
+Cookies are read at startup and on reconnect, never written back, so nothing
+needs a persistent disk. When they expire, update the Secret File and redeploy.
+
+Raising `POOL_SIZE` costs roughly 300–500 MB per extra worker and drives more
+concurrent traffic at one account; raise the instance plan with it, and treat
+upstream rate limiting as the real ceiling rather than the memory.
 
 ---
 

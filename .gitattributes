@@ -1,0 +1,6 @@
+# This repo is authored on Windows (core.autocrlf=true) and built on Linux.
+# A CRLF shebang line makes the container fail with "bad interpreter", so pin
+# shell scripts to LF regardless of the checkout platform.
+*.sh text eol=lf
+docker-entrypoint.sh text eol=lf
+Dockerfile text eol=lf

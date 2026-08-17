@@ -156,9 +156,14 @@ export class ChatGPTClient {
   async init() {
     if (this._initPromise) return this._initPromise;
     this._initPromise = (async () => {
-      const projectDir = path.resolve();
-      const chromePath = path.join(projectDir, "Application", "chrome.exe");
-      const executablePath = fs.existsSync(chromePath) ? chromePath : undefined;
+      // CHROME_PATH is what the container images set; the bundled Application/
+      // directory is the local Windows fallback. Undefined lets
+      // puppeteer-real-browser find an installed Chrome itself.
+      const bundledChrome = path.join(path.resolve(), "Application", "chrome.exe");
+      const executablePath =
+        process.env.CHROME_PATH ||
+        process.env.PUPPETEER_EXECUTABLE_PATH ||
+        (fs.existsSync(bundledChrome) ? bundledChrome : undefined);
 
       if (this._sharedBrowser) {
         this.page = await this.browser.newPage();

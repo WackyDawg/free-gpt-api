@@ -1,0 +1,59 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# One web service running the proxy in Docker: Xvfb + headed Chromium + the
+# Express API. Deploy with Render > New > Blueprint, pointed at this repo.
+#
+# Two things are NOT in this file and must be set in the dashboard after the
+# first deploy (see the "Deploying to Render" section of the README):
+#   1. The ChatGPT cookie export, as a Secret File named
+#      chatgpt.com.cookies.json. It cannot live in the repo.
+#   2. Nothing else — ANTHROPIC_AUTH_TOKEN is generated for you below.
+
+services:
+  - type: web
+    name: free-gpt-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # Chromium plus a virtual display does not fit in 512 MB. Standard (2 GB)
+    # is the realistic floor; drop to starter only to test that it boots.
+    plan: standard
+    region: oregon
+    healthCheckPath: /health
+    autoDeploy: false
+    # Never scale past one. Every instance would drive the same ChatGPT account
+    # with the same cookies, which is what gets a session rate-limited.
+    numInstances: 1
+    envVars:
+      - key: PORT
+        value: 3000
+
+      # Headed Chromium on the Xvfb display started by docker-entrypoint.sh.
+      # True headless is far more likely to be challenged by Cloudflare.
+      - key: HEADLESS
+        value: "false"
+
+      # One browser tab. Each additional worker is roughly another 300–500 MB,
+      # so raise this only together with the instance plan.
+      - key: POOL_SIZE
+        value: "1"
+      - key: MAX_QUEUE
+        value: "32"
+
+      # Render mounts Secret Files here at runtime. Alternatively set
+      # CHATGPT_COOKIES_B64 (base64 of the same JSON) and the entrypoint will
+      # materialise it, overriding this path.
+      - key: CHATGPT_COOKIES_PATH
+        value: /etc/secrets/chatgpt.com.cookies.json
+
+      # A Render URL is public. Without a token, anyone who finds it is talking
+      # to your ChatGPT account. Render generates the value; read it from the
+      # dashboard and give it to your clients as x-api-key / Bearer token.
+      - key: ANTHROPIC_AUTH_TOKEN
+        generateValue: true
+
+      - key: MODEL_OPUS
+        value: gpt-5-6-thinking
+      - key: MODEL_SONNET
+        value: gpt-5.3
+      - key: MODEL_HAIKU
+        value: gpt-5.3-nano

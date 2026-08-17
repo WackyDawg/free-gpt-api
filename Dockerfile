@@ -6,6 +6,9 @@ ENV LIBGL_ALWAYS_SOFTWARE=1
 ENV GALLIUM_DRIVER=llvmpipe
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
+# puppeteer-real-browser resolves Chrome through chrome-launcher, which reads
+# CHROME_PATH rather than PUPPETEER_EXECUTABLE_PATH.
+ENV CHROME_PATH=/usr/bin/google-chrome-stable
 
 USER root
 
@@ -36,11 +39,12 @@ WORKDIR /usr/src/app
 
 COPY --chown=pptruser:pptruser package*.json ./
 
-RUN npm install --omit=dev
+# ci, not install: the lockfile is authoritative and this skips resolution,
+# which is most of the build minutes on a hosted builder.
+RUN npm ci --omit=dev --no-audit --no-fund
 
 COPY --chown=pptruser:pptruser . .
 
-COPY --chown=pptruser:pptruser docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
 
 EXPOSE 3000
